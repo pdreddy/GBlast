@@ -130,3 +130,10 @@ Files: `expiry_blast.py` (bot + shared signal code), `expiry_backtest.py`, `expi
 **Recorder**: run `expiry_recorder.command` before 09:15 on each expiry day. It saves ATM +/-3 strikes (CE+PE) 1-minute quotes to `data/expiry_premiums/`. After a few weeks you have real premiums.
 
 **Honest expectations**: breakeven win rate for 1:4 is ~20% before costs. 1% risk x max 4 trades/day cannot produce +200%/month; do not raise risk to chase it. The default strategy in CONFIG is a prior guess, not a validated edge - trust only what the test half of *your real data* shows, then paper trade.
+
+
+---
+
+# Signal Lab (does anything predict the index?)
+
+`signal_lab.command` (or `python3 signal_lab.py`) tests 8 pre-declared entry signals on your real 1-minute NIFTY + SENSEX data **without any option-price modelling**: after each signal it measures the signed index move after 15/30/60 minutes, discovery half vs unseen half, with a multiple-testing-aware pass rule (|t| >= 2.5 on discovery AND same sign |t| >= 1.65 on the unseen half). It tells you plainly if nothing predicts the index. Only a signal that passes is worth turning into an option strategy. `--demo null|trend` self-checks the lab (random walk must give no passes; the trend data must).
