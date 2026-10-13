@@ -3,3 +3,5 @@ __pycache__/
 .venv/
 expiry_blast.log
 gamma_blast.log
+.env
+access_token.txt

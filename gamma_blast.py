@@ -58,7 +58,7 @@ IST = ZoneInfo("Asia/Kolkata")
 # CONFIG - edit here
 # =====================================================================================
 CONFIG = {
-    "client_id": CLIENT_ID,                 # set in config.py
+    "client_id": CLIENT_ID,                 # from .env
     "access_token_file": "access_token.txt",
     "paper_trading": True,                  # <-- keep True until you have paper results
 

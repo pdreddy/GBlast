@@ -15,7 +15,8 @@ Hero-or-zero intraday **option buying** bot. Buys high-gamma ATM/near-OTM option
 
 ```
 GammaBlast/
-├── config.py         <- put your FYERS App ID + Secret here (only file you must edit)
+├── .env              <- YOUR App ID + Secret (copy from .env.example; git-ignored, never commit)
+├── config.py         <- reads .env (no secrets in code)
 ├── gamma_blast.py    <- the strategy; CONFIG block at the top for capital/risk/indices
 ├── fyers_login.py    <- daily login, creates access_token.txt
 ├── start.bat         <- Windows: double-click every morning
@@ -33,7 +34,7 @@ Created automatically while running: `gamma_blast.log` (full log), `gamma_blast_
 1. Install **Python 3.9 or newer** (Windows: tick "Add Python to PATH").
 2. Create an API app at <https://myapi.fyers.in/dashboard>. Set the redirect URL to
    `https://trade.fyers.in/api-login/redirect-uri/index.html`. Give it order permissions.
-3. Open `config.py` and paste your **App ID** and **Secret ID**.
+3. Copy `.env.example` to `.env` and fill in `FYERS_CLIENT_ID` and `FYERS_SECRET_KEY` (this file is git-ignored).
 4. Open `gamma_blast.py`, and in `CONFIG` set `capital` to your real trading amount.
 
 ## Every trading day (start before 09:15 IST)

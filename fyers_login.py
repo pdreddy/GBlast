@@ -21,8 +21,8 @@ def token_is_from_today():
 
 
 def login():
-    if "XXXX" in CLIENT_ID or "YOUR_" in SECRET_KEY:
-        raise SystemExit("Edit config.py first: put in your FYERS App ID and Secret ID.")
+    if not CLIENT_ID or not SECRET_KEY:
+        raise SystemExit("Credentials missing: copy .env.example to .env and fill in FYERS_CLIENT_ID and FYERS_SECRET_KEY.")
 
     session = fyersModel.SessionModel(
         client_id=CLIENT_ID, secret_key=SECRET_KEY, redirect_uri=REDIRECT_URI,
