@@ -22,8 +22,16 @@ def token_is_from_today():
 
 def login():
     if not CLIENT_ID or not SECRET_KEY:
-        raise SystemExit("Credentials missing: copy .env.example to .env and fill in FYERS_CLIENT_ID and FYERS_SECRET_KEY.")
+        import config
+        raise SystemExit("Credentials missing.\n" + config.explain())
 
+    import re
+    if not re.fullmatch(r"[A-Za-z0-9]{6,}-\d{2,3}", CLIENT_ID) or CLIENT_ID.upper() in ("ZZZ-100", "AB1CD2EF3G-100"):
+        raise SystemExit(
+            f"The App ID '{CLIENT_ID}' does not look like a real FYERS App ID, and FYERS answers 'invalid clientId'.\n"
+            "It must be copied exactly from https://myapi.fyers.in/dashboard > your app > 'App ID', e.g. XXXXXXXXXX-100\n"
+            "(10 letters/digits, a dash, then 100 - the '-100' part is required). It is NOT the app name, your FYERS login ID\n"
+            "(like XA12345) or the Secret ID. Check .env with:  python3 config.py")
     session = fyersModel.SessionModel(
         client_id=CLIENT_ID, secret_key=SECRET_KEY, redirect_uri=REDIRECT_URI,
         response_type="code", grant_type="authorization_code")
