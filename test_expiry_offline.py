@@ -425,6 +425,35 @@ check("HTF data missing -> NO trade", eb.signal(f_, 60, Sm) is None)
 f_["mtf"] = [{5: -1, 15: -1, 60: -1}] * len(bear)
 check("bearish momentum + all HTF down -> PE", eb.signal(eb.day_features(bear, Sm) | {"mtf": f_["mtf"]}, 60, Sm) == "PE")
 
+# ---------------------------------------------------------------------------
+print("\n[10] Discipline guards")
+check("guards configured", CFG["max_daily_loss_pct"] == 2.0 and CFG["max_consecutive_losses"] == 3 and CFG["max_monthly_loss_pct"] == 6.0)
+bot = new_bot()
+bot.S = eb.compile_strategy(dict(CFG["strategy"], win_start="09:30", win_end="14:45", mtf_tfs=[]))
+check("fresh day: entries allowed", bot.can_enter("NIFTY", at(13, 30)))
+bot.realised = -4001                                           # 2% of 2,00,000 = 4,000
+check("daily loss limit blocks new entries", not bot.can_enter("NIFTY", at(13, 30)) and "daily" in bot.halted())
+bot = new_bot()
+bot.S = eb.compile_strategy(dict(CFG["strategy"], win_start="09:30", win_end="14:45", mtf_tfs=[]))
+for price in (50, 50, 50):                                     # three stop-outs in a row
+    bot.broker.px[SYM] = 60
+    bot.enter("NIFTY", "CE", ROW, 60.0, {})
+    bot.broker.px[SYM] = price - 10
+    bot.manage()
+    bot.trades_today["NIFTY"] = 0
+check("3 consecutive losses halt the day", bot.loss_streak == 3 and not bot.can_enter("NIFTY", at(13, 30)), f"streak {bot.loss_streak}, {bot.halted()}")
+bot2 = new_bot()
+bot2.S = bot.S
+if os.path.exists(eb.TRADE_LOG):
+    os.remove(eb.TRADE_LOG)                                      # isolate the monthly sum
+check("monthly guard: empty log -> not halted", bot2.month_pnl() == 0 and bot2.halted() is None)
+open(eb.TRADE_LOG, "w").write("date,index,symbol,type,qty,entry_time,entry,exit_time,exit,pnl\n")
+open(eb.TRADE_LOG, "a").write(f"{g.now_ist().date()},NIFTY,x,CE,1,t,1,t,1,-5000,-1,SL,PAPER,{{}}\n")
+check("monthly guard: -5,000 (< 6% = 12,000) -> not halted", bot2.halted() is None, f"month pnl {bot2.month_pnl():,.0f}")
+open(eb.TRADE_LOG, "a").write(f"{g.now_ist().date()},NIFTY,x,CE,1,t,1,t,1,-8000,-1,SL,PAPER,{{}}\n")
+check("monthly guard: -13,000 (> 6% of capital) -> halted, no entries",
+      "monthly" in (bot2.halted() or "") and not bot2.can_enter("NIFTY", at(13, 30)), f"{bot2.halted()}")
+
 shutil.rmtree(TMP, ignore_errors=True)
 print(f"\nRESULT: {passed} passed, {failed} failed")
 sys.exit(1 if failed else 0)

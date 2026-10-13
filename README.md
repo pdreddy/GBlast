@@ -137,3 +137,8 @@ Files: `expiry_blast.py` (bot + shared signal code), `expiry_backtest.py`, `expi
 # Signal Lab (does anything predict the index?)
 
 `signal_lab.command` (or `python3 signal_lab.py`) tests 8 pre-declared entry signals on your real 1-minute NIFTY + SENSEX data **without any option-price modelling**: after each signal it measures the signed index move after 15/30/60 minutes, discovery half vs unseen half, with a multiple-testing-aware pass rule (|t| >= 2.5 on discovery AND same sign |t| >= 1.65 on the unseen half). It tells you plainly if nothing predicts the index. Only a signal that passes is worth turning into an option strategy. `--demo null|trend` self-checks the lab (random walk must give no passes; the trend data must).
+
+
+---
+
+**Read `SUCCESS_PLAN.md`** - a phased plan (record, paper, tiny live, scale) with go/no-go gates and hard rules based on your own trade statement. The bot enforces daily loss (2%), 3-losses-in-a-row and monthly loss (6%) guards (`max_daily_loss_pct`, `max_consecutive_losses`, `max_monthly_loss_pct` in `expiry_blast.py`).

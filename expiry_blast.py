@@ -60,6 +60,10 @@ CONFIG = {
     "max_capital_per_trade_pct": 40.0,      # premium outlay cap
     "max_open_positions": 2,                # 1 per index x 2 indices
     "max_trades_per_index": 2,              # per expiry day
+    # ---- discipline guards (from the real-trade review: oversizing, no stops, revenge trading) ----
+    "max_daily_loss_pct": 2.0,              # stop new entries for the day after losing this % of capital
+    "max_consecutive_losses": 3,            # ...or after this many losing trades in a row
+    "max_monthly_loss_pct": 6.0,            # stop trading for the rest of the month (paper or live) at this loss
 
     # ---- exits (strict 1:4) ----
     "stop_loss_pct": 25.0,
@@ -338,7 +342,7 @@ class ExpiryBlast(g.GammaBlast):
     # ---------------- persistence (own files) ----------------
     def _save_state(self):
         data = {"date": g.now_ist().strftime("%Y-%m-%d"), "realised": self.realised,
-                "trades_today": self.trades_today,
+                "trades_today": self.trades_today, "loss_streak": getattr(self, "loss_streak", 0),
                 "positions": {k: asdict(v) for k, v in self.positions.items()}}
         with open(STATE_FILE, "w") as f:
             json.dump(data, f, indent=2)
@@ -351,6 +355,7 @@ class ExpiryBlast(g.GammaBlast):
             return
         self.realised = data.get("realised", 0.0)
         self.trades_today.update(data.get("trades_today", {}))
+        self.loss_streak = data.get("loss_streak", 0)
         self.positions = {k: g.Position(**v) for k, v in data.get("positions", {}).items()}
         log.info("Restored state: %d open position(s), realised %.0f", len(self.positions), self.realised)
 
@@ -372,8 +377,47 @@ class ExpiryBlast(g.GammaBlast):
         return size_lots(c["capital"], c["risk_per_trade_pct"], price, c["stop_loss_pct"], lot,
                          c["indices"][name]["max_lots"], c["max_capital_per_trade_pct"])
 
+    def month_pnl(self, now=None):
+        """Realised P&L of the current calendar month from the trade log (includes today)."""
+        month = (now or g.now_ist()).strftime("%Y-%m")
+        if not os.path.exists(TRADE_LOG):
+            return 0.0
+        total = 0.0
+        for row in csv.reader(open(TRADE_LOG)):
+            if row and row[0].startswith(month):
+                try:
+                    total += float(row[9])
+                except (ValueError, IndexError):
+                    pass
+        return total
+
+    def halted(self, now=None):
+        """Reason string if a discipline guard forbids new entries, else None."""
+        c = self.cfg
+        if self.realised <= -c["capital"] * c["max_daily_loss_pct"] / 100:
+            return f"daily loss limit hit ({self.realised:,.0f})"
+        if getattr(self, "loss_streak", 0) >= c["max_consecutive_losses"]:
+            return f"{self.loss_streak} losses in a row"
+        if self.month_pnl(now) <= -c["capital"] * c["max_monthly_loss_pct"] / 100:
+            return f"monthly loss limit hit ({self.month_pnl(now):,.0f})"
+        return None
+
+    def _close(self, name, px, reason, broker_done=False):
+        before = self.realised
+        super()._close(name, px, reason, broker_done)
+        if name not in self.positions:                           # really closed
+            pnl = self.realised - before
+            self.loss_streak = getattr(self, "loss_streak", 0) + 1 if pnl < 0 else 0
+            self._save_state()
+
     def can_enter(self, name, now, expiry=None):
         c = self.cfg
+        why = self.halted(now)
+        if why:
+            if getattr(self, "_halt_logged", None) != why:
+                log.warning("TRADING HALTED for new entries: %s", why)
+                self._halt_logged = why
+            return False
         if not c["indices"][name]["enabled"] or name in self.positions:
             return False
         if len(self.positions) >= c["max_open_positions"]:
