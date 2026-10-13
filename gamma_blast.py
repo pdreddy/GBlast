@@ -63,7 +63,7 @@ CONFIG = {
     "paper_trading": True,                  # <-- keep True until you have paper results
 
     # ---- money management ----
-    "capital": 200000,                      # trading capital in INR
+    "capital": 100000,                      # trading capital in INR
     "risk_per_trade_pct": 1.0,              # INR lost if the 40% stop is hit = 1% of capital
     "max_capital_per_trade_pct": 40.0,      # premium outlay cap per trade
     "max_daily_loss_pct": 3.0,              # stop opening new trades after this realised loss
@@ -72,8 +72,8 @@ CONFIG = {
     "loss_cooldown_min": 15,                # wait after a losing trade on the same index
 
     # ---- Gamma Blast exits (your original spec) ----
-    "stop_loss_pct": 40.0,
-    "target_pct": 200.0,
+    "stop_loss_pct": 5.0,
+    "target_pct": 40.0,
     "trail_trigger_pct": 50.0,
     "trail_gap_pct": 25.0,
     "trail_min_step_pct": 2.0,              # only modify broker SL if it rises >= 2% of entry
@@ -120,7 +120,7 @@ CONFIG = {
         "BANKNIFTY": {
             # Only MONTHLY options exist for BANKNIFTY, so gamma is lower most of the month.
             # A lower threshold is used; it will still trade far less often than NIFTY/SENSEX.
-            "enabled": True,
+            "enabled": False,
             "spot": "NSE:NIFTYBANK-INDEX",
             "master": "NSE_FO",
             "underlying": "BANKNIFTY",
@@ -358,7 +358,10 @@ class Broker:
         ob = resp.get("orderBook") or []
         if not ob:
             return None, 0.0
-        o = ob[0]
+        matches = [x for x in ob if str(x.get("id") or x.get("orderId") or "") == str(oid)]
+        if not matches:
+            return None, 0.0
+        o = matches[0]
         return int(o.get("status", 0)), float(o.get("tradedPrice") or 0)
 
     def wait_fill(self, oid, timeout=15):
@@ -397,6 +400,8 @@ class GammaBlast:
     def __init__(self, cfg):
         self.cfg = cfg
         self.paper = cfg["paper_trading"]
+        if not self.paper:
+            raise RuntimeError("Legacy live trading is DISABLED in V7 research branch. Manage existing FYERS positions manually.")
         self.broker = Broker(cfg)
         self.master = SymbolMaster()
         self.master.load(cfg["indices"])
@@ -522,7 +527,7 @@ class GammaBlast:
             return True
         cs = self._closed(self.broker.candles_today(symbol))
         if len(cs) < n:
-            return True
+            return False
         return ltp > max(x[2] for x in cs[-n:])
 
     @staticmethod
@@ -601,6 +606,11 @@ class GammaBlast:
                      now_ist().strftime("%H:%M:%S"), meta=meta)
         if not self.paper:
             p.sl_order_id = self._place_sl(p)
+            if not p.sl_order_id:
+                self.positions[name] = p
+                log.critical("BROKER STOP FAILED after filled entry. Attempting emergency close.")
+                self._close(name, fill, "BROKER_SL_FAILED")
+                return
         self.positions[name] = p
         self.trades_today[name] = self.trades_today.get(name, 0) + 1
         self._save_state()
@@ -644,12 +654,13 @@ class GammaBlast:
                 if new_sl - p.sl >= p.entry * c["trail_min_step_pct"] / 100:
                     if not p.trail_on:
                         log.info("TRAIL ON %s peak %.2f (+%.0f%%)", p.symbol, p.peak, peak_gain)
-                    p.trail_on = True
-                    p.sl = new_sl
                     if not self.paper and p.sl_order_id:
                         lim = round_tick(new_sl * (1 - c["sl_limit_buffer_pct"] / 100), p.tick)
                         if not self.broker.modify_sl(p.sl_order_id, p.qty, new_sl, lim):
-                            log.warning("SL modify failed for %s", p.symbol)
+                            log.error("SL modify failed for %s; retained old stop", p.symbol)
+                            continue
+                    p.trail_on = True
+                    p.sl = new_sl
                     log.info("SL -> %.2f on %s", p.sl, p.symbol)
                     self._save_state()
 
@@ -678,12 +689,15 @@ class GammaBlast:
         exit_px = px
         if not self.paper and not broker_done:
             if p.sl_order_id:
-                self.broker.cancel(p.sl_order_id)
+                cancelled = self.broker.cancel(p.sl_order_id)
                 time.sleep(0.5)
                 st, spx = self.broker.status(p.sl_order_id)
                 if st == 2:                      # stop filled while we were cancelling
                     exit_px, reason = spx or p.sl, "SL_RACE"
                     broker_done = True
+                elif not cancelled or st != 1:
+                    log.critical("STOP CANCEL UNCONFIRMED for %s; refusing possible duplicate exit", p.symbol)
+                    return
             if not broker_done:
                 oid = self.broker.place(p.symbol, p.qty, side=-1, otype=2)
                 fill = self.broker.wait_fill(oid) if oid else None
