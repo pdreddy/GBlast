@@ -6,3 +6,4 @@ gamma_blast.log
 .env
 access_token.txt
 *.log
+expiry_best.json

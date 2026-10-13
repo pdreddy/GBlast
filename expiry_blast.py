@@ -50,6 +50,8 @@ CONFIG = {
     "client_id": CLIENT_ID,
     "access_token_file": "access_token.txt",
     "paper_trading": True,                  # <-- keep True until you have weeks of paper results
+    "use_backtest_result": False,           # True = load strategy + breakeven from expiry_best.json (written by
+                                            # expiry_backtest). Ignored if the backtest verdict was "NO EDGE".
 
     # ---- money management ----
     "capital": 200000,
@@ -237,12 +239,27 @@ def size_lots(capital, risk_pct, price, sl_pct, lot, max_lots=10, max_capital_pc
     return max(lots, 0)
 
 
+def apply_backtest_result(cfg, path="expiry_best.json"):
+    """Optionally take the strategy chosen by expiry_backtest. Never adopts a result whose verdict is 'bad'."""
+    if not cfg.get("use_backtest_result"):
+        return cfg
+    if not os.path.exists(path):
+        log.warning("use_backtest_result is on but %s does not exist - run expiry_backtest first. Using CONFIG.", path)
+        return cfg
+    best = json.load(open(path))
+    if best.get("verdict") == "bad":
+        log.warning("Backtest verdict: %s - NOT adopting it. Using CONFIG.", best.get("headline"))
+        return cfg
+    log.info("Using backtest result '%s' (generated %s, verdict: %s)", best["name"], best["generated"], best["headline"])
+    return {**cfg, "strategy": {**cfg["strategy"], **best["strategy"]}, "breakeven_enabled": best["breakeven"]}
+
+
 # =====================================================================================
 # Live / paper bot (reuses gamma_blast's Broker, SymbolMaster, enter, SL placement and exits)
 # =====================================================================================
 class ExpiryBlast(g.GammaBlast):
     def __init__(self, cfg):                                   # deliberately not calling the parent __init__
-        self.cfg = cfg
+        self.cfg = cfg = apply_backtest_result(cfg)
         self.paper = cfg["paper_trading"]
         self.S = compile_strategy(cfg["strategy"])
         self.broker = g.Broker(cfg)

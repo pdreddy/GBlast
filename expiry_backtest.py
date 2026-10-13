@@ -103,6 +103,55 @@ def load_dir(folder="data"):
     return {k: [v[t] for t in sorted(v)] for k, v in out.items()}
 
 
+def fetch_range(broker, symbol, start, end):
+    """1-minute candles from FYERS in 60-day chunks (FYERS limits intraday history per request)."""
+    out, cur = [], start
+    while cur <= end:
+        stop = min(cur + dt.timedelta(days=59), end)
+        r = broker._call(broker.f.history, {
+            "symbol": symbol, "resolution": "1", "date_format": "1",
+            "range_from": cur.strftime("%Y-%m-%d"), "range_to": stop.strftime("%Y-%m-%d"), "cont_flag": "1"})
+        if r.get("s") != "ok" and not r.get("candles"):
+            print(f"   warning: {symbol} {cur}..{stop}: {r.get('message', r)}")
+        out += r.get("candles") or []
+        cur = stop + dt.timedelta(days=1)
+    return out
+
+
+def sync_data(broker, indices, folder="data", years_back=1, today=None):
+    """Download whatever 1-minute history is missing (NIFTY, SENSEX, India VIX) into data/. Re-runs only fetch new days."""
+    os.makedirs(folder, exist_ok=True)
+    today = today or dt.datetime.now(IST).date()
+    have = load_dir(folder)
+    wanted = {k: C["indices"][k]["spot"] for k in indices}
+    wanted["VIX"] = "NSE:INDIAVIX-INDEX"
+    for key, symbol in wanted.items():
+        rows = have.get(key)
+        start = (dt.datetime.fromtimestamp(rows[-1][0], IST).date() if rows
+                 else today - dt.timedelta(days=365 * years_back))
+        if start >= today and rows:
+            print(f"{key}: up to date")
+            continue
+        print(f"Downloading {key} {start} .. {today}")
+        new = [c for c in fetch_range(broker, symbol, start, today) if not rows or c[0] > rows[-1][0]]
+        if not new:
+            print(f"   no new candles for {key}")
+            continue
+        fn = os.path.join(folder, f"{key}_1min_{start}_{today}.csv")
+        with open(fn, "w", newline="") as f:
+            csv.writer(f).writerows([[int(c[0])] + [float(x) for x in c[1:5]] + [float(c[5]) if len(c) > 5 else 0.0]
+                                     for c in sorted(new, key=lambda c: c[0])])
+        print(f"   {len(new):,} candles -> {fn}")
+
+
+def connect():
+    """Log in if today's token is missing (one paste of the auth_code), then return a Broker."""
+    import fyers_login
+    if not fyers_login.token_is_from_today():
+        fyers_login.login()
+    return eb.g.Broker(C)
+
+
 def by_day(candles):
     days = defaultdict(list)
     for c in candles:
@@ -575,6 +624,7 @@ def main():
                     help="synthetic data. 'null' = pure random walk (must show NO edge); "
                          "'trend' = random walk with momentum bursts (edge by construction, checks the engine can find one)")
     ap.add_argument("--data", default="data", help="folder with the 1-minute CSVs")
+    ap.add_argument("--no-download", action="store_true", help="use the CSVs already in data/, do not contact FYERS")
     ap.add_argument("--days", type=int, default=250, help="demo only: number of trading days")
     a = ap.parse_args()
     indices = [k for k, v in C["indices"].items() if v["enabled"]]
@@ -589,6 +639,14 @@ def main():
         data["VIX"] = vix
         label, out_html = f"(DEMO {a.demo} - synthetic data)", f"expiry_report_DEMO_{a.demo}.html"
     else:
+        if not a.no_download:
+            try:
+                sync_data(connect(), indices, a.data)
+            except SystemExit as e:
+                print(f"Could not log in / download: {e}")
+                if not glob.glob(os.path.join(a.data, "*.csv")):
+                    sys.exit("No data available. Fill in .env (see README) or put CSVs in data/. Or try --demo.")
+                print("Using the CSVs already in data/.")
         data = load_dir(a.data)
         missing = [k for k in indices if not data.get(k)]
         if missing:
@@ -644,6 +702,13 @@ def main():
             w.writeheader()
             w.writerows(all_tr)
     s_tu, s_te = stats(tune_tr), stats(test_tr)
+    if not a.demo:
+        import json
+        with open("expiry_best.json", "w") as f:
+            json.dump({"generated": dt.date.today().isoformat(), "name": chosen["name"], "strategy": chosen["ov"],
+                       "breakeven": chosen["be"], "verdict": verdict(s_tu, s_te)[0],
+                       "headline": verdict(s_tu, s_te)[1]}, f, indent=2)
+        print("Saved expiry_best.json (the bot can use it: set use_backtest_result to True in expiry_blast.py)")
     for nm, s in (("TUNE", s_tu), ("TEST", s_te)):
         print(f"{nm}: trades {s['trades']} | win {s['win_rate']:.0f}% | PF {s['profit_factor']:.2f} | "
               f"net Rs {s['net']:,.0f} | maxDD Rs {s['max_dd']:,.0f} | worst streak {s['loss_streak']}")

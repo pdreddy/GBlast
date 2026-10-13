@@ -336,6 +336,41 @@ check("recorder: ATM is 24500, strikes 24350..24650",
 n0 = rec.record_once(RecBroker(), RecMaster(now + dt.timedelta(days=2)), CFG, "NIFTY", now, TMP)
 check("recorder: nothing recorded on a non-expiry day", n0 == 0)
 
+# ---------------------------------------------------------------------------
+print("\n[8] Data download from FYERS (fake broker) and optional use of the backtest result")
+
+
+class HistBroker:
+    class f:
+        history = None
+
+    def __init__(self):
+        self.calls = []
+
+    def _call(self, fn, data):
+        self.calls.append(data)
+        t0 = int(dt.datetime.strptime(data["range_from"], "%Y-%m-%d").replace(tzinfo=eb.IST, hour=9, minute=15).timestamp())
+        return {"s": "ok", "candles": [[t0 + 60 * i, 100, 101, 99, 100, 0] for i in range(3)]}
+
+
+hb, folder = HistBroker(), os.path.join(TMP, "data")
+xb.sync_data(hb, ["NIFTY", "SENSEX"], folder, today=dt.date(2026, 10, 13))
+files = sorted(os.listdir(folder))
+check("sync_data downloads NIFTY, SENSEX and VIX into data/",
+      [f.split("_")[0] for f in files] == ["NIFTY", "SENSEX", "VIX"], f"{files}")
+check("history is fetched in <=60-day chunks", all((dt.datetime.strptime(c["range_to"], "%Y-%m-%d") -
+      dt.datetime.strptime(c["range_from"], "%Y-%m-%d")).days <= 59 for c in hb.calls), f"{len(hb.calls)//3} chunks per symbol")
+check("downloaded files are readable by the backtest loader", set(xb.load_dir(folder)) == {"NIFTY", "SENSEX", "VIX"})
+import json
+bp = os.path.join(TMP, "best.json")
+json.dump({"generated": "2026-10-13", "name": "x", "strategy": {"mode": "ORB", "win_start": "09:30", "win_end": "11:00", "otm_steps": 0},
+           "breakeven": True, "verdict": "warn", "headline": "h"}, open(bp, "w"))
+on = eb.apply_backtest_result(dict(CFG, use_backtest_result=True), bp)
+check("use_backtest_result adopts strategy + breakeven", on["strategy"]["mode"] == "ORB" and on["breakeven_enabled"] is True)
+check("off by default", eb.apply_backtest_result(CFG, bp) is CFG)
+json.dump({"verdict": "bad", "headline": "NO EDGE", "name": "x", "generated": "d", "strategy": {"mode": "ORB"}, "breakeven": True}, open(bp, "w"))
+check("never adopts a 'NO EDGE' result", eb.apply_backtest_result(dict(CFG, use_backtest_result=True), bp)["strategy"]["mode"] == CFG["strategy"]["mode"])
+
 shutil.rmtree(TMP, ignore_errors=True)
 print(f"\nRESULT: {passed} passed, {failed} failed")
 sys.exit(1 if failed else 0)

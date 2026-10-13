@@ -18,16 +18,22 @@ The access token is created by `fyers_login.py`. The `.command` launchers run it
 3. It prints `Login OK - saved access_token.txt`. The token is saved in the project folder in `access_token.txt` (git-ignored) and the bot reads it from there.
 4. If a token from today already exists, the login step is skipped. A new token is needed each trading day.
 
-## 3. Running (Mac: right-click > Open the first time, or `chmod +x *.command`)
+## 3. Running: nothing to copy except your secrets
+The only things you provide are the secrets in `.env` and the daily `auth_code` paste at login (FYERS requires a login every day; nothing else is manual).
 | What | Mac | Terminal |
 |---|---|---|
-| Backtest on your `data/*.csv` | `expiry_backtest.command` | `python3 expiry_backtest.py` |
+| **Backtest**: logs in, downloads 1 year of 1-minute NIFTY / SENSEX / India VIX from FYERS into `data/` (later runs fetch only new days), then tests | `expiry_backtest.command` | `python3 expiry_backtest.py` |
 | Record real expiry-day premiums (before 09:15) | `expiry_recorder.command` | `python3 expiry_recorder.py` |
 | Expiry Blast bot, paper mode (before 09:15) | `expiry_blast.command` | `python3 expiry_blast.py` |
 | Offline checks | `run_tests.command` | `python3 test_expiry_offline.py` |
 | Emergency stop (squares off and stops) | `stop.command` | `touch KILL` |
 
-Suggested order: backtest first, then record on expiry days, then paper trade 4-6 weeks. Paper mode is ON by default (`"paper_trading": True` in `expiry_blast.py` `CONFIG`). Delete the `KILL` file before the next start.
+(Mac: right-click > Open the first time, or `chmod +x *.command`.)
+Backtest options: `--no-download` uses only the CSVs already in `data/`; `--demo null|trend` uses synthetic data.
+
+**Using the backtest's choice without copying anything:** the backtest writes `expiry_best.json`. In `expiry_blast.py` set `"use_backtest_result": True` (one flag) and the bot loads the chosen entry mode, window, strike and breakeven setting from it. It refuses to adopt a result whose verdict is "NO EDGE".
+
+Suggested order: backtest first, then record on expiry days, then paper trade 4-6 weeks. Paper mode is ON by default (`"paper_trading": True`). Delete the `KILL` file before the next start.
 
 **Troubleshooting:** `Credentials missing` means `.env` is absent or its names are wrong. `Login failed` usually means a wrong or old `auth_code`, or a Redirect URL that does not match the app. `access_token.txt not found` means run the login first.
 

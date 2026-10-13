@@ -5,11 +5,6 @@ if [ ! -x .venv/bin/python ]; then
   echo "First run: setting up Python environment (1-2 minutes)..."
   python3 -m venv .venv && .venv/bin/python -m pip install --upgrade pip -q && .venv/bin/python -m pip install -q -r requirements.txt || { read -p "Setup failed. Press Enter to close"; exit 1; }
 fi
-if ls data/*.csv >/dev/null 2>&1; then
-  .venv/bin/python expiry_backtest.py
-else
-  echo "No data/*.csv found - running the synthetic DEMO instead (put your 1-minute CSVs in data/ for the real test)."
-  .venv/bin/python expiry_backtest.py --demo null
-fi
-open expiry_report.html expiry_report_DEMO_null.html 2>/dev/null
+.venv/bin/python expiry_backtest.py    # logs in to FYERS (one auth_code paste), downloads data/, backtests
+open expiry_report.html 2>/dev/null
 read -p "Done. Press Enter to close"
