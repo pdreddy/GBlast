@@ -9,6 +9,7 @@ Options: expired option prices do not exist, so premiums are MODELLED:
            (theta acceleration; Black-Scholes itself already accelerates decay as T -> 0),
            slippage >= 2% per side, and full charges (brokerage, STT, exchange, SEBI, GST, stamp).
          If one bar touches both stop and target, the STOP is assumed to hit first.
+Multi-timeframe: entries need the 5m/15m(/1h) EMA9-vs-EMA21 trend (built from 1-min data across days) to agree.
 Honesty: 20 simple variants are evaluated on the TUNE half only; the best by profit factor is frozen
          and run on the TEST half with nothing changed. All 20 are shown on both halves for transparency.
          The verdict says plainly if there is no edge. Nothing is tuned to look good.
@@ -324,10 +325,14 @@ class Market:
             self.expiry_days[k] = [d for d in sorted(self.days_by_index[k]) if cal.nearest(k, d) == d]
         self.feat = {}
         for k in indices:
+            full = [c for d in sorted(self.days_by_index[k]) for c in self.days_by_index[k][d]]
+            trend = eb.htf_trend(full, (5, 15, 60))                 # 5m / 15m / 1h trend from ALL days (EMA warm-up)
             for d in self.expiry_days[k]:
                 bars = self.days_by_index[k][d]
                 if len(bars) >= 60:
-                    self.feat[(k, d)] = (bars, eb.day_features(bars, self.S0))
+                    f = eb.day_features(bars, self.S0)
+                    f["mtf"] = [eb.mtf_signs_at(trend, b_[0] + 60) for b_ in bars]
+                    self.feat[(k, d)] = (bars, f)
 
     def vix_fn(self, day):
         last = [self.vix_day.get(day, BT["default_vix"])]
@@ -354,15 +359,16 @@ class Market:
 # Variants and statistics
 # =====================================================================================
 VARIANTS = []
-for (label, ov), be, otm in itertools.product([
+for (label, ov), mtf, otm in itertools.product([
         ("ORB morning", {"mode": "ORB", "win_start": "09:30", "win_end": "11:00"}),
         ("EXT afternoon", {"mode": "EXT", "win_start": "13:00", "win_end": "14:45"}),
         ("MOM morning", {"mode": "MOM", "win_start": "09:30", "win_end": "11:00"}),
         ("MOM afternoon", {"mode": "MOM", "win_start": "13:00", "win_end": "14:45"}),
         ("MOM all-day", {"mode": "MOM", "win_start": "09:30", "win_end": "14:45"})],
-        [False, True], [0, 1]):
-    VARIANTS.append({"name": f"{label} | {'ATM' if otm == 0 else '1-OTM'} | BE {'on' if be else 'off'}",
-                     "ov": {**ov, "otm_steps": otm}, "be": be})
+        [[5, 15], [5, 15, 60]], [0, 1]):
+    # multi-timeframe confirmation is ALWAYS on (5m+15m, or 5m+15m+1h); breakeven is compared separately afterwards
+    VARIANTS.append({"name": f"{label} | {'ATM' if otm == 0 else '1-OTM'} | MTF {'+'.join(str(x) if x < 60 else '1h' for x in mtf)}",
+                     "ov": {**ov, "otm_steps": otm, "mtf_tfs": mtf}, "be": False})
 
 
 def stats(tr, capital=None):
@@ -535,7 +541,7 @@ def cards(s):
                                           for a, b in items) + "</div>"
 
 
-def build_report(mkt, label, split, chosen, tune_tr, test_tr, grid, sens, be_cmp, path, days):
+def build_report(mkt, label, split, chosen, tune_tr, test_tr, grid, sens, be_cmp, path, days, mtf_cmp=()):
     cap = C["capital"]
     tune, test = stats(tune_tr), stats(test_tr)
     kind, headline, detail = verdict(tune, test)
@@ -557,9 +563,13 @@ def build_report(mkt, label, split, chosen, tune_tr, test_tr, grid, sens, be_cmp
                       f"<td class='{cls(a['net'])}'>{money(a['net'])}</td><td>{b['trades']}</td>"
                       f"<td>{b['profit_factor']:.2f}</td><td class='{cls(b['net'])}'>{money(b['net'])}</td></tr>"
                       for n, a, b in be_cmp)
+    mtf_rows = "".join(f"<tr><td>{n}</td><td>{a['trades']}</td><td>{a['win_rate']:.0f}%</td><td>{a['profit_factor']:.2f}</td>"
+                       f"<td class='{cls(a['net'])}'>{money(a['net'])}</td><td>{b['trades']}</td><td>{b['win_rate']:.0f}%</td>"
+                       f"<td>{b['profit_factor']:.2f}</td><td class='{cls(b['net'])}'>{money(b['net'])}</td></tr>"
+                       for n, a, b in mtf_cmp)
     ov = chosen["ov"]
     snippet = (f'"strategy": {{"mode": "{ov["mode"]}", "win_start": "{ov["win_start"]}", "win_end": "{ov["win_end"]}", '
-               f'"otm_steps": {ov["otm_steps"]}, ...}},   "breakeven_enabled": {chosen["be"]}')
+               f'"otm_steps": {ov["otm_steps"]}, "mtf_tfs": {ov["mtf_tfs"]}, ...}},   "breakeven_enabled": {chosen["be"]}')
     page = f"""<!doctype html><html><head><meta charset="utf-8"><title>Expiry Blast Backtest</title>
 <meta name="viewport" content="width=device-width,initial-scale=1"><style>{CSS}</style></head><body>
 <h1>Expiry Blast backtest {html.escape(label)}</h1>
@@ -571,7 +581,7 @@ slippage {BT['slippage_pct']}%/side + full charges · square-off {C['square_off'
 {("<div class='note'><b>DEMO DATA - NOT YOUR MARKET.</b> " + ("Pure random walk: no edge exists, so a losing result is the CORRECT outcome and shows the engine does not invent profits." if "null" in label else "Synthetic momentum bursts: an edge exists by construction, so a profitable result only shows the engine CAN detect one.") + " Put your real CSVs in <code>data/</code> and run again.</div>") if "DEMO" in label else ""}
 
 <h2>Strategy chosen on the tuning half (then frozen)</h2>
-<p><b>{html.escape(chosen['name'])}</b> — picked by highest profit factor on the tuning half (min 30 trades) out of {len(grid)} variants.
+<p><b>{html.escape(chosen['name'])}</b> — picked by highest profit factor on the tuning half (min 30 trades) out of {len(grid)} variants. Every variant also requires the 5m/15m(/1h) charts to trend the same way as the trade.
 Expect some selection luck on the tuning half; the test half below is the honest number.<br>
 <code>{html.escape(snippet)}</code></p>
 
@@ -594,6 +604,9 @@ The rules were not tuned toward any monthly target.</div>
 <div><h2>Per entry time window — tuning half</h2>{group_table(tune_tr, lambda t: t['window'], win_order)}</div></div>
 <div class="twocol"><div><h2>Exit reasons — test half</h2>{group_table(test_tr, lambda t: t['reason'])}</div>
 <div><h2>Call vs put — test half</h2>{group_table(test_tr, lambda t: t['type'])}</div></div>
+
+<h2>Higher-timeframe confirmation (5m / 15m / 1h EMA9 vs EMA21 must agree): what it does to the chosen entry</h2>
+<table><tr><th></th><th>Tune trades</th><th>Win</th><th>PF</th><th>Net</th><th>Test trades</th><th>Win</th><th>PF</th><th>Net</th></tr>{mtf_rows}</table>
 
 <h2>Breakeven stop at +60%: with vs without (same entries as chosen variant)</h2>
 <table><tr><th></th><th>Tune trades</th><th>Win</th><th>PF</th><th>Net</th><th>Test trades</th><th>PF</th><th>Net</th></tr>{be_rows}</table>
@@ -685,6 +698,12 @@ def main():
         be_cmp.append((name, stats([t for t in r if t["date"] < split.isoformat()]),
                        stats([t for t in r if t["date"] >= split.isoformat()])))
 
+    mtf_cmp = []
+    for name, tfs in (("No higher-timeframe filter (1-min only)", []), ("5m + 15m", [5, 15]), ("5m + 15m + 1h", [5, 15, 60])):
+        r = mkt.run({**chosen["ov"], "mtf_tfs": tfs}, chosen["be"])
+        mtf_cmp.append((name, stats([t for t in r if t["date"] < split.isoformat()]),
+                        stats([t for t in r if t["date"] >= split.isoformat()])))
+
     sens = []
     for name, ch in (("Baseline (as reported)", {}), ("Slippage 3% per side", {"slippage_pct": 3.0}),
                      ("Slippage 4% per side", {"slippage_pct": 4.0}),
@@ -694,7 +713,7 @@ def main():
         r = mkt.run(chosen["ov"], chosen["be"], bt={**BT, **ch}, start=split)
         sens.append((name, stats(r)))
 
-    build_report(mkt, label, split, chosen, tune_tr, test_tr, grid, sens, be_cmp, out_html, days)
+    build_report(mkt, label, split, chosen, tune_tr, test_tr, grid, sens, be_cmp, out_html, days, mtf_cmp)
     all_tr = tune_tr + test_tr
     if all_tr:
         with open("expiry_trades.csv", "w", newline="") as f:

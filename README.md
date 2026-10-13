@@ -118,6 +118,7 @@ Separate strategy with its own CONFIG. Reuses the login, broker wrapper, symbol 
 | Time | No entries after 14:45, square-off 15:15 |
 | Risk | 1% of capital per trade; skipped if 1 lot risks more |
 | Entry modes | `ORB` opening-range break, `EXT` day-high/low break, `MOM` momentum candle (all need VWAP side + EMA9/21 direction) |
+| Multi-timeframe | The **5-minute, 15-minute and 1-hour** charts must all trend the same way as the trade (EMA9 vs EMA21 of completed bars, built from 1-minute data across days; `mtf_tfs` in CONFIG, `[]` = off). The backtest shows what the filter does versus 1-minute only. |
 
 Files: `expiry_blast.py` (bot + shared signal code), `expiry_backtest.py`, `expiry_recorder.py`, `test_expiry_offline.py`, and Mac launchers `expiry_blast.command`, `expiry_backtest.command`, `expiry_recorder.command` (right-click > Open the first time). `stop.command` stops it too.
 

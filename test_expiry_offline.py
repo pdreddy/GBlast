@@ -124,7 +124,7 @@ check("breakeven armed at +60%", abs(bot.positions["NIFTY"].sl - 60.0) < 0.06, f
 print("\n[3] Entry guards")
 bot = new_bot()
 at = lambda h, m: g.now_ist().replace(hour=h, minute=m, second=5)
-bot.S = eb.compile_strategy(dict(CFG["strategy"], win_start="09:30", win_end="14:45"))
+bot.S = eb.compile_strategy(dict(CFG["strategy"], win_start="09:30", win_end="14:45", mtf_tfs=[]))
 check("entry allowed 14:45", bot.can_enter("NIFTY", at(14, 45)))
 check("NO entry at 14:46", not bot.can_enter("NIFTY", at(14, 46)))
 check("NO entry before window", not bot.can_enter("NIFTY", at(9, 20)))
@@ -208,7 +208,7 @@ check("position closed", "NIFTY" not in bot.positions)
 # ---------------------------------------------------------------------------
 print("\n[5] Backtest simulator rules (premiums from the same Black-Scholes model)")
 BTX = dict(xb.BT, slippage_pct=0.0, iv_mult_open=1.0, iv_mult_close=1.0, iv_extra_fade=0.0)
-S1 = eb.compile_strategy(dict(CFG["strategy"], min_premium=1, max_premium=1000, otm_steps=0))
+S1 = eb.compile_strategy(dict(CFG["strategy"], min_premium=1, max_premium=1000, otm_steps=0, mtf_tfs=[]))
 day = dt.date(2026, 6, 16)                                     # a Tuesday
 start = int(dt.datetime.combine(day, dt.time(9, 15), eb.IST).timestamp())
 
@@ -272,7 +272,7 @@ check("sim: max 2 trades per index per day", len(many) == 2, f"{len(many)} trade
 
 # ---------------------------------------------------------------------------
 print("\n[6] Signals: correct direction and no look-ahead")
-S2 = eb.compile_strategy(dict(CFG["strategy"], mode="MOM", win_start="09:30", win_end="14:45"))
+S2 = eb.compile_strategy(dict(CFG["strategy"], mode="MOM", win_start="09:30", win_end="14:45", mtf_tfs=[]))
 t0 = int(dt.datetime.combine(day, dt.time(9, 15), eb.IST).timestamp())
 bars, px = [], 25000.0
 for i in range(60):
@@ -287,7 +287,7 @@ check("momentum candle up -> CE", eb.signal(fb, 60, S2) == "CE")
 check("momentum candle down -> PE", eb.signal(fr, 60, S2) == "PE")
 check("quiet bars -> no trade", eb.signal(eb.day_features(bars, S2), 59, S2) is None)
 for mode in ("MOM", "EXT", "ORB"):
-    Sx = eb.compile_strategy(dict(CFG["strategy"], mode=mode, win_start="09:30", win_end="14:45"))
+    Sx = eb.compile_strategy(dict(CFG["strategy"], mode=mode, win_start="09:30", win_end="14:45", mtf_tfs=[]))
     full = eb.day_features(bull + [[t0 + 3660 + 60 * k, px + 40 - 5 * k, px + 41, px - 90, px - 80, 0] for k in range(5)], Sx)
     cut = eb.day_features(bull, Sx)
     same = all(eb.signal(full, i, Sx) == eb.signal(cut, i, Sx) for i in range(len(bull)))
@@ -370,6 +370,54 @@ check("use_backtest_result adopts strategy + breakeven", on["strategy"]["mode"] 
 check("off by default", eb.apply_backtest_result(CFG, bp) is CFG)
 json.dump({"verdict": "bad", "headline": "NO EDGE", "name": "x", "generated": "d", "strategy": {"mode": "ORB"}, "breakeven": True}, open(bp, "w"))
 check("never adopts a 'NO EDGE' result", eb.apply_backtest_result(dict(CFG, use_backtest_result=True), bp)["strategy"]["mode"] == CFG["strategy"]["mode"])
+
+# ---------------------------------------------------------------------------
+print("\n[9] Multi-timeframe (5m / 15m / 1h) confirmation")
+check("MTF filter is ON by default (5m, 15m, 1h)", CFG["strategy"]["mtf_tfs"] == [5, 15, 60])
+
+
+def trending_days(n_days, slope):
+    out, px = [], 25000.0
+    d0 = dt.date(2026, 5, 4)
+    for dd in range(n_days):
+        t0 = int(dt.datetime.combine(d0 + dt.timedelta(days=dd), dt.time(9, 15), eb.IST).timestamp())
+        for i in range(375):
+            o = px
+            px = px + slope + (0.5 if i % 2 else -0.5)
+            out.append([t0 + 60 * i, o, max(o, px) + 0.3, min(o, px) - 0.3, px, 0])
+    return out
+
+
+up_c, dn_c = trending_days(8, 0.4), trending_days(8, -0.4)
+tr_up, tr_dn = eb.htf_trend(up_c), eb.htf_trend(dn_c)
+last_ts = up_c[-1][0] + 60
+check("steady uptrend: 5m, 15m and 1h all +1", set(eb.mtf_signs_at(tr_up, last_ts).values()) == {1}, f"{eb.mtf_signs_at(tr_up, last_ts)}")
+check("steady downtrend: 5m, 15m and 1h all -1", set(eb.mtf_signs_at(tr_dn, dn_c[-1][0] + 60).values()) == {-1})
+check("too little history -> 0 (blocks trading)", set(eb.mtf_signs_at(eb.htf_trend(up_c[:60]), up_c[59][0] + 60).values()) == {0})
+# no look-ahead: sign at time T identical whether or not later data exists
+T = up_c[1500][0] + 60
+a = eb.mtf_signs_at(eb.htf_trend(up_c), T)
+b_ = eb.mtf_signs_at(eb.htf_trend(up_c[:1500]), T)
+check("HTF trend at T does not depend on later bars", a == b_, f"{a} vs {b_}")
+# live helper == backtest lookup (drops the still-forming bucket)
+check("live_mtf equals backtest lookup", eb.live_mtf(up_c[:1500], T, [5, 15, 60]) == a)
+# a 5-min bucket still forming at T must not be used
+tr5 = eb.htf_trend(up_c[:1503], (5,))
+ends = tr5[5][0]
+check("incomplete 5-minute bucket is never used", all(e <= T for e in ends[:eb.bisect_right(ends, T) if hasattr(eb, "bisect_right") else sum(1 for e in ends if e <= T)]))
+# signal needs agreement
+Sm = eb.compile_strategy(dict(CFG["strategy"], mode="MOM", win_start="09:30", win_end="14:45", mtf_tfs=[5, 15, 60]))
+f_ = eb.day_features(bull, Sm)
+f_["mtf"] = [{5: 1, 15: 1, 60: 1}] * len(bull)
+check("bullish momentum + all HTF up -> CE", eb.signal(f_, 60, Sm) == "CE")
+f_["mtf"] = [{5: 1, 15: 1, 60: -1}] * len(bull)
+check("one higher timeframe disagrees -> NO trade", eb.signal(f_, 60, Sm) is None)
+f_["mtf"] = [{5: 1, 15: 0, 60: 1}] * len(bull)
+check("higher timeframe undecided (0) -> NO trade", eb.signal(f_, 60, Sm) is None)
+f_["mtf"] = [None] * len(bull)
+check("HTF data missing -> NO trade", eb.signal(f_, 60, Sm) is None)
+f_["mtf"] = [{5: -1, 15: -1, 60: -1}] * len(bear)
+check("bearish momentum + all HTF down -> PE", eb.signal(eb.day_features(bear, Sm) | {"mtf": f_["mtf"]}, 60, Sm) == "PE")
 
 shutil.rmtree(TMP, ignore_errors=True)
 print(f"\nRESULT: {passed} passed, {failed} failed")

@@ -17,7 +17,8 @@ Entry modes (strategy.mode) - one is picked, they are NOT combined:
   ORB  opening-range breakout   : close crosses the 09:15-09:30 high/low
   EXT  day-extreme breakout     : close makes a new high/low of the day (use with an afternoon window)
   MOM  momentum candle          : body >= 60% of range AND range >= 1.5 x ATR14
-  All modes also need: price on the right side of VWAP and EMA9 vs EMA21 in the trade direction.
+  All modes also need: price on the right side of VWAP, EMA9 vs EMA21 in the trade direction, AND the
+  5-minute, 15-minute and 1-hour charts trending the same way (EMA9 vs EMA21 of completed bars).
 
 The signal code (day_features / signal / pick_strike / size_lots) is shared with
 expiry_backtest.py, so what you backtest is what the bot trades.
@@ -88,6 +89,9 @@ CONFIG = {
         "body_ratio": 0.6,                  # MOM: body >= 60% of range
         "orb_end": "09:30",
         "warmup_bars": 22,
+        # multi-timeframe filter: the 5m / 15m / 1h charts must ALL trend the same way as the trade
+        # (EMA9 vs EMA21 on completed bars, built from 1-minute data across days). [] switches it off.
+        "mtf_tfs": [5, 15, 60],
     },
 
     # ---- instruments (NIFTY Tue / SENSEX Thu weekly expiries; the symbol master decides the date) ----
@@ -125,6 +129,58 @@ def compile_strategy(s: dict) -> dict:
     for k in ("win_start", "win_end", "orb_end"):
         out[k] = _m(s[k])
     return out
+
+
+def _ema_series(vals, p):
+    k, e, out = 2 / (p + 1), vals[0], []
+    for v in vals:
+        e = v * k + e * (1 - k)
+        out.append(e)
+    return out
+
+
+def htf_trend(candles, tfs=(5, 15, 60), fast=9, slow=21, min_bars=None):
+    """Higher-timeframe trend from 1-minute candles (several days, session bars only, ascending).
+    Buckets are aligned to the 09:15 open. Returns {tf: (nominal_end_ts list, sign list)} where sign is +1 if
+    EMA(fast) > EMA(slow) of the bucket closes, -1 if below, 0 while there are too few bars (blocks trading)."""
+    min_bars = min_bars or slow
+    out = {}
+    for tf in tfs:
+        buckets, key = [], None
+        for c in candles:
+            t = c[0]
+            m = ((t + 19800) % 86400) // 60
+            k = (m - 555) // tf
+            kk = ((t + 19800) // 86400, k)
+            if kk != key:
+                key = kk
+                start = t - ((m - 555) - k * tf) * 60 - t % 60
+                day_open = start - k * tf * 60
+                buckets.append([min(start + tf * 60, day_open + 375 * 60), c[4]])
+            else:
+                buckets[-1][1] = c[4]                                  # close of the bucket so far
+        closes = [b_[1] for b_ in buckets]
+        ef, es = _ema_series(closes, fast), _ema_series(closes, slow)
+        signs = [(1 if ef[i] > es[i] else -1 if ef[i] < es[i] else 0) if i + 1 >= min_bars else 0
+                 for i in range(len(buckets))]
+        out[tf] = ([b_[0] for b_ in buckets], signs)
+    return out
+
+
+def mtf_signs_at(trend, close_ts):
+    """{tf: sign} using only higher-timeframe bars that were COMPLETE at close_ts (no look-ahead)."""
+    import bisect
+    res = {}
+    for tf, (ends, signs) in trend.items():
+        j = bisect.bisect_right(ends, close_ts) - 1
+        res[tf] = signs[j] if j >= 0 else 0
+    return res
+
+
+def live_mtf(full_candles, close_ts, tfs):
+    """Live helper: same maths as the backtest, on candles up to close_ts (drops the still-forming bucket)."""
+    sub = [c for c in full_candles if c[0] < close_ts]
+    return mtf_signs_at(htf_trend(sub, tfs), close_ts)
 
 
 def day_features(candles, S):
@@ -185,6 +241,13 @@ def signal(f, i, S):
     c, o_, h, l = f["c"][i], f["o"][i], f["h"][i], f["l"][i]
     up = c > f["vwap"][i] and f["ema_f"][i] > f["ema_s"][i]
     dn = c < f["vwap"][i] and f["ema_f"][i] < f["ema_s"][i]
+    tfs = S.get("mtf_tfs") or []
+    if tfs:                                                    # 5m / 15m / 1h must all agree with the direction
+        m = (f.get("mtf") or [None] * f["n"])[i]
+        if not m:
+            return None
+        up = up and all(m.get(tf) == 1 for tf in tfs)
+        dn = dn and all(m.get(tf) == -1 for tf in tfs)
     if not (up or dn):
         return None
     mode = S["mode"]
@@ -328,10 +391,14 @@ class ExpiryBlast(g.GammaBlast):
         if not self.can_enter(name, now, expiry):
             return
         ic = self.cfg["indices"][name]
-        candles = self._closed(self.broker.candles_today(ic["spot"]))
+        full = self._closed(self.broker.candles_range(ic["spot"], 8 if self.S.get("mtf_tfs") else 0))
+        today0 = int(now.replace(hour=0, minute=0, second=0, microsecond=0).timestamp())
+        candles = [c for c in full if c[0] >= today0]
         if not candles or now.timestamp() - candles[-1][0] > 150:
             return                                              # stale data - never trade on it
         f = day_features(candles, self.S)
+        if self.S.get("mtf_tfs"):
+            f["mtf"] = [None] * (len(candles) - 1) + [live_mtf(full, candles[-1][0] + 60, self.S["mtf_tfs"])]
         side = signal(f, len(candles) - 1, self.S)
         if not side:
             return
@@ -352,7 +419,7 @@ class ExpiryBlast(g.GammaBlast):
         row = rows[K]
         fill_px = ltp * (1 + self.cfg["paper_slippage_pct"] / 100) if self.paper else ltp
         self.enter(name, side, row, g.round_tick(fill_px, row.tick),
-                   {"mode": self.S["mode"], "spot": spot, "ltp_seen": ltp, "expiry": expiry.strftime("%Y-%m-%d")})
+                   {"mode": self.S["mode"], "mtf": f.get("mtf", [None])[-1], "spot": spot, "ltp_seen": ltp, "expiry": expiry.strftime("%Y-%m-%d")})
 
     # ---------------- manage (-25% SL, +100% target, optional breakeven) ----------------
     def manage(self):

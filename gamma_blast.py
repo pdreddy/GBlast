@@ -335,6 +335,15 @@ class Broker:
             "range_from": today, "range_to": today, "cont_flag": "1"})
         return resp.get("candles", []) or []
 
+    def candles_range(self, symbol, days_back=0):
+        """1-minute candles for today and the previous `days_back` calendar days."""
+        today = now_ist().date()
+        resp = self._call(self.f.history, {
+            "symbol": symbol, "resolution": "1", "date_format": "1",
+            "range_from": (today - dt.timedelta(days=days_back)).strftime("%Y-%m-%d"),
+            "range_to": today.strftime("%Y-%m-%d"), "cont_flag": "1"})
+        return resp.get("candles", []) or []
+
     def place(self, symbol, qty, side, otype=2, limit=0.0, stop=0.0):
         resp = self._call(self.f.place_order, {
             "symbol": symbol, "qty": int(qty), "type": otype, "side": side,
