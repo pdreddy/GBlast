@@ -8,6 +8,9 @@ fi
 echo "===== TEST 1: offline logic ====="
 .venv/bin/python test_offline.py
 echo
+echo "===== TEST 1b: Expiry Blast offline logic ====="
+.venv/bin/python test_expiry_offline.py
+echo
 echo "===== TEST 2: FYERS connection (no orders) ====="
 .venv/bin/python fyers_login.py && .venv/bin/python test_connection.py
 read -p "Done. Press Enter to close"

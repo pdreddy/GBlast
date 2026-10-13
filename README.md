@@ -58,3 +58,32 @@ so results are an estimate. `python backtest.py --demo` runs on fake data withou
 - **BANKNIFTY** has only monthly expiries, so it qualifies for trades far less often.
 - Keep the PC awake and online during market hours. The FYERS-side stop protects open trades if it disconnects, but the trailing stop only moves while the bot is running.
 - This is software, not investment advice. Option buying with a 40% stop loses on most trades and relies on rare big winners. Trade only money you can afford to lose.
+
+
+---
+
+# Expiry Blast (new) - expiry-day hero-or-zero, NIFTY Tue + SENSEX Thu
+
+Separate strategy with its own CONFIG. Reuses the login, broker wrapper, symbol master, broker-side SL, cancel-then-sell exits, KILL file, state file and paper mode of Gamma Blast.
+
+| Rule | Setting |
+|---|---|
+| Days | Only the expiry day of each index, only the expiring contract |
+| Strike | ATM or 1-2 OTM, premium must be Rs 20-150 |
+| Stop loss | -25% of entry, placed as a broker SL-L order right after entry |
+| Target | +100% (1:4). Optional breakeven: at +60% stop moves to entry (`breakeven_enabled`) |
+| Limits | 2 trades per index per day, 1 open position per index |
+| Time | No entries after 14:45, square-off 15:15 |
+| Risk | 1% of capital per trade; skipped if 1 lot risks more |
+| Entry modes | `ORB` opening-range break, `EXT` day-high/low break, `MOM` momentum candle (all need VWAP side + EMA9/21 direction) |
+
+Files: `expiry_blast.py` (bot + shared signal code), `expiry_backtest.py`, `expiry_recorder.py`, `test_expiry_offline.py`, and Mac launchers `expiry_blast.command`, `expiry_backtest.command`, `expiry_recorder.command` (right-click > Open the first time). `stop.command` stops it too.
+
+**Backtest** (`expiry_backtest.command`, or `python expiry_backtest.py`): put your 1-minute CSVs in `data/` (names must contain NIFTY / SENSEX / VIX; BANKNIFTY ignored; columns epoch,open,high,low,close,volume). It evaluates 20 simple variants on the **first half** of the data, freezes the best, and reports the **second half** unchanged, with a plain-language verdict, equity curve, monthly P&L, per-index / per-time-window tables, breakeven on/off, and a robustness table (worse slippage / IV). Open `expiry_report.html`.
+`--demo null` (random walk with fair option pricing - must show no edge) and `--demo trend` (edge built in - engine must find it) check the machinery without data.
+
+**Premiums are modelled** (Black-Scholes, India VIX x expiry-day IV profile, extra fade after 13:00, 2%/side slippage, full charges; stop assumed first if a bar touches both). Assumptions sit in `BT` at the top of `expiry_backtest.py` - verify STT/lot sizes against your contract note.
+
+**Recorder**: run `expiry_recorder.command` before 09:15 on each expiry day. It saves ATM +/-3 strikes (CE+PE) 1-minute quotes to `data/expiry_premiums/`. After a few weeks you have real premiums.
+
+**Honest expectations**: breakeven win rate for 1:4 is ~20% before costs. 1% risk x max 4 trades/day cannot produce +200%/month; do not raise risk to chase it. The default strategy in CONFIG is a prior guess, not a validated edge - trust only what the test half of *your real data* shows, then paper trade.
