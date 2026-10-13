@@ -29,7 +29,7 @@ The only things you provide are the secrets in `.env` and the daily `auth_code` 
 | Emergency stop (squares off and stops) | `stop.command` | `touch KILL` |
 
 (Mac: right-click > Open the first time, or `chmod +x *.command`.)
-Backtest options: `--no-download` uses only the CSVs already in `data/`; `--demo null|trend` uses synthetic data.
+Backtest options: `--days 365` (calendar days to download and test; default 365, the launcher asks), `--no-download` uses only the CSVs already in `data/`; `--demo null|trend` uses synthetic data.
 
 **Using the backtest's choice without copying anything:** the backtest writes `expiry_best.json`. In `expiry_blast.py` set `"use_backtest_result": True` (one flag) and the bot loads the chosen entry mode, window, strike and breakeven setting from it. It refuses to adopt a result whose verdict is "NO EDGE".
 

@@ -354,12 +354,18 @@ class HistBroker:
 
 
 hb, folder = HistBroker(), os.path.join(TMP, "data")
-xb.sync_data(hb, ["NIFTY", "SENSEX"], folder, today=dt.date(2026, 10, 13))
+xb.sync_data(hb, ["NIFTY", "SENSEX"], folder, 365, today=dt.date(2026, 10, 13))
 files = sorted(os.listdir(folder))
 check("sync_data downloads NIFTY, SENSEX and VIX into data/",
       [f.split("_")[0] for f in files] == ["NIFTY", "SENSEX", "VIX"], f"{files}")
 check("history is fetched in <=60-day chunks", all((dt.datetime.strptime(c["range_to"], "%Y-%m-%d") -
       dt.datetime.strptime(c["range_from"], "%Y-%m-%d")).days <= 59 for c in hb.calls), f"{len(hb.calls)//3} chunks per symbol")
+n_before = len(os.listdir(folder))
+xb.sync_data(hb, ["NIFTY", "SENSEX"], folder, 365, today=dt.date(2026, 10, 13))
+check("re-run for the same window downloads nothing new", len(os.listdir(folder)) == n_before)
+hb.calls.clear()
+xb.sync_data(hb, ["NIFTY"], folder, 700, today=dt.date(2026, 10, 13))
+check("asking for more days back-fills older history", any(c["range_from"] < "2025-10-13" for c in hb.calls), f"{len(hb.calls)} calls")
 check("downloaded files are readable by the backtest loader", set(xb.load_dir(folder)) == {"NIFTY", "SENSEX", "VIX"})
 import json
 bp = os.path.join(TMP, "best.json")

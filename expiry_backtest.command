@@ -5,6 +5,7 @@ if [ ! -x .venv/bin/python ]; then
   echo "First run: setting up Python environment (1-2 minutes)..."
   python3 -m venv .venv && .venv/bin/python -m pip install --upgrade pip -q && .venv/bin/python -m pip install -q -r requirements.txt || { read -p "Setup failed. Press Enter to close"; exit 1; }
 fi
-.venv/bin/python expiry_backtest.py    # logs in to FYERS (one auth_code paste), downloads data/, backtests
+read -p "How many days back to test? [365]: " DAYS
+.venv/bin/python expiry_backtest.py --days "${DAYS:-365}"    # logs in to FYERS (one auth_code paste), downloads data/, backtests
 open expiry_report.html 2>/dev/null
 read -p "Done. Press Enter to close"

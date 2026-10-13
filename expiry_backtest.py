@@ -119,30 +119,42 @@ def fetch_range(broker, symbol, start, end):
     return out
 
 
-def sync_data(broker, indices, folder="data", years_back=1, today=None):
-    """Download whatever 1-minute history is missing (NIFTY, SENSEX, India VIX) into data/. Re-runs only fetch new days."""
+def sync_data(broker, indices, folder="data", days=365, today=None):
+    """Download whatever 1-minute history is missing (NIFTY, SENSEX, India VIX) into data/, covering the last
+    `days` calendar days. Later runs fetch only new days; asking for more days than before back-fills the older part."""
     os.makedirs(folder, exist_ok=True)
     today = today or dt.datetime.now(IST).date()
+    want_start = today - dt.timedelta(days=days)
     have = load_dir(folder)
     wanted = {k: C["indices"][k]["spot"] for k in indices}
     wanted["VIX"] = "NSE:INDIAVIX-INDEX"
-    for key, symbol in wanted.items():
-        rows = have.get(key)
-        start = (dt.datetime.fromtimestamp(rows[-1][0], IST).date() if rows
-                 else today - dt.timedelta(days=365 * years_back))
-        if start >= today and rows:
-            print(f"{key}: up to date")
-            continue
-        print(f"Downloading {key} {start} .. {today}")
-        new = [c for c in fetch_range(broker, symbol, start, today) if not rows or c[0] > rows[-1][0]]
+
+    def save(key, symbol, a, b, existing_ts):
+        print(f"Downloading {key} {a} .. {b}")
+        new = [c for c in fetch_range(broker, symbol, a, b) if c[0] not in existing_ts]
         if not new:
             print(f"   no new candles for {key}")
-            continue
-        fn = os.path.join(folder, f"{key}_1min_{start}_{today}.csv")
+            return
+        fn = os.path.join(folder, f"{key}_1min_{a}_{b}.csv")
         with open(fn, "w", newline="") as f:
             csv.writer(f).writerows([[int(c[0])] + [float(x) for x in c[1:5]] + [float(c[5]) if len(c) > 5 else 0.0]
                                      for c in sorted(new, key=lambda c: c[0])])
         print(f"   {len(new):,} candles -> {fn}")
+
+    for key, symbol in wanted.items():
+        rows = have.get(key) or []
+        ts = {r[0] for r in rows}
+        if not rows:
+            save(key, symbol, want_start, today, ts)
+            continue
+        first = dt.datetime.fromtimestamp(rows[0][0], IST).date()
+        last = dt.datetime.fromtimestamp(rows[-1][0], IST).date()
+        if first > want_start + dt.timedelta(days=5):              # older history requested than we have
+            save(key, symbol, want_start, first, ts)
+        if last < today:
+            save(key, symbol, last, today, ts)
+        if first <= want_start + dt.timedelta(days=5) and last >= today:
+            print(f"{key}: up to date")
 
 
 def connect():
@@ -638,29 +650,31 @@ def main():
                          "'trend' = random walk with momentum bursts (edge by construction, checks the engine can find one)")
     ap.add_argument("--data", default="data", help="folder with the 1-minute CSVs")
     ap.add_argument("--no-download", action="store_true", help="use the CSVs already in data/, do not contact FYERS")
-    ap.add_argument("--days", type=int, default=250, help="demo only: number of trading days")
+    ap.add_argument("--days", type=int, default=365, help="calendar days of history to download and test (default 365)")
     a = ap.parse_args()
     indices = [k for k, v in C["indices"].items() if v["enabled"]]
 
     if a.demo:
         if a.demo == "null":
             print("DEMO MODE (null): pure random walk - there is NO edge, a correct engine must not find one.")
-            data, vix = null_market(indices, a.days)
+            data, vix = null_market(indices, round(a.days * 0.69))
         else:
             print("DEMO MODE (trend): synthetic data WITH momentum bursts - an edge exists by construction.")
-            data, vix = bt0.synthetic(indices, a.days)
+            data, vix = bt0.synthetic(indices, round(a.days * 0.69))
         data["VIX"] = vix
         label, out_html = f"(DEMO {a.demo} - synthetic data)", f"expiry_report_DEMO_{a.demo}.html"
     else:
         if not a.no_download:
             try:
-                sync_data(connect(), indices, a.data)
+                sync_data(connect(), indices, a.data, a.days)
             except SystemExit as e:
                 print(f"Could not log in / download: {e}")
                 if not glob.glob(os.path.join(a.data, "*.csv")):
                     sys.exit("No data available. Fill in .env (see README) or put CSVs in data/. Or try --demo.")
                 print("Using the CSVs already in data/.")
         data = load_dir(a.data)
+        cutoff = int(dt.datetime.combine(dt.datetime.now(IST).date() - dt.timedelta(days=a.days), dt.time(0), IST).timestamp())
+        data = {k: [c for c in v if c[0] >= cutoff] for k, v in data.items()}
         missing = [k for k in indices if not data.get(k)]
         if missing:
             sys.exit(f"No candle files for {missing} in '{a.data}/'. File names must contain NIFTY / SENSEX / VIX. "
