@@ -1,3 +1,38 @@
+# QUICK START: credentials, daily token, running
+
+## 1. One-time: get your App ID and Secret ID, save them in `.env`
+1. Log in at <https://myapi.fyers.in/dashboard> and click **Create App**.
+2. Set the **Redirect URL** to `https://trade.fyers.in/api-login/redirect-uri/index.html` and give the app order permissions.
+3. Copy the **App ID** (looks like `AB1CD2EF3G-100`) and the **Secret ID**.
+4. In the project folder run `cp .env.example .env`, open `.env` in any text editor, and fill in:
+   ```
+   FYERS_CLIENT_ID=AB1CD2EF3G-100
+   FYERS_SECRET_KEY=your_secret_id
+   ```
+   `.env` is git-ignored, so it is never committed. Never share it. If a Secret ID leaks, regenerate it on the dashboard.
+
+## 2. Every trading day: get the access token (it expires daily)
+The access token is created by `fyers_login.py`. The `.command` launchers run it for you automatically before the bot starts. To run it by hand, use `python3 fyers_login.py`.
+1. A FYERS login page opens in your browser. Log in with your FYERS ID, PIN and TOTP.
+2. You land on a page whose address bar contains `...?auth_code=XXXX...`. Copy the `auth_code` value, or copy the whole address, into the terminal prompt **Paste auth_code** and press Enter.
+3. It prints `Login OK - saved access_token.txt`. The token is saved in the project folder in `access_token.txt` (git-ignored) and the bot reads it from there.
+4. If a token from today already exists, the login step is skipped. A new token is needed each trading day.
+
+## 3. Running (Mac: right-click > Open the first time, or `chmod +x *.command`)
+| What | Mac | Terminal |
+|---|---|---|
+| Backtest on your `data/*.csv` | `expiry_backtest.command` | `python3 expiry_backtest.py` |
+| Record real expiry-day premiums (before 09:15) | `expiry_recorder.command` | `python3 expiry_recorder.py` |
+| Expiry Blast bot, paper mode (before 09:15) | `expiry_blast.command` | `python3 expiry_blast.py` |
+| Offline checks | `run_tests.command` | `python3 test_expiry_offline.py` |
+| Emergency stop (squares off and stops) | `stop.command` | `touch KILL` |
+
+Suggested order: backtest first, then record on expiry days, then paper trade 4-6 weeks. Paper mode is ON by default (`"paper_trading": True` in `expiry_blast.py` `CONFIG`). Delete the `KILL` file before the next start.
+
+**Troubleshooting:** `Credentials missing` means `.env` is absent or its names are wrong. `Login failed` usually means a wrong or old `auth_code`, or a Redirect URL that does not match the app. `access_token.txt not found` means run the login first.
+
+---
+
 # Gamma Blast – FYERS Auto Trader (NIFTY · BANKNIFTY · SENSEX)
 
 Hero-or-zero intraday **option buying** bot. Buys high-gamma ATM/near-OTM options of the nearest expiry when the index breaks out with momentum.
