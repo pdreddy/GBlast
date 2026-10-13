@@ -1,0 +1,16 @@
+2026-10-13 13:57:06,165 INFO Downloading symbol master NSE_FO
+2026-10-13 13:57:06,753 INFO NIFTY: 4057 option contracts, lot size 65
+2026-10-13 13:57:06,762 INFO BANKNIFTY: 2368 option contracts, lot size 30
+2026-10-13 13:57:06,762 INFO Downloading symbol master BSE_FO
+2026-10-13 13:57:06,924 INFO SENSEX: 3328 option contracts, lot size 20
+2026-10-13 13:57:06,942 INFO Gamma Blast started | mode=PAPER | indices=['NIFTY', 'BANKNIFTY', 'SENSEX']
+2026-10-13 14:10:52,703 INFO Downloading symbol master NSE_FO
+2026-10-13 14:10:53,379 INFO NIFTY: 4057 option contracts, lot size 65
+2026-10-13 14:10:53,388 INFO BANKNIFTY: 2368 option contracts, lot size 30
+2026-10-13 14:10:53,388 INFO Downloading symbol master BSE_FO
+2026-10-13 14:10:53,529 INFO SENSEX: 3328 option contracts, lot size 20
+2026-10-13 14:11:20,236 INFO Downloading symbol master NSE_FO
+2026-10-13 14:11:20,778 INFO NIFTY: 4057 option contracts, lot size 65
+2026-10-13 14:11:20,787 INFO BANKNIFTY: 2368 option contracts, lot size 30
+2026-10-13 14:11:20,787 INFO Downloading symbol master BSE_FO
+2026-10-13 14:11:20,920 INFO SENSEX: 3328 option contracts, lot size 20
