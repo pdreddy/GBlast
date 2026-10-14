@@ -14,6 +14,8 @@ Rules (strict 1:4)
     than that, the trade is skipped.
 
 Entry modes (strategy.mode) - one is picked, they are NOT combined:
+  ANCHOR time-anchored breakouts: 09:30 (break of the 09:15-09:30 range), 12:00 (break of 11:30-12:00),
+         14:00 (break of 13:30-14:00); each allowed for a fixed span after its anchor. `anchors` lists which are on.
   ORB  opening-range breakout   : close crosses the 09:15-09:30 high/low
   EXT  day-extreme breakout     : close makes a new high/low of the day (use with an afternoon window)
   MOM  momentum candle          : body >= 60% of range AND range >= 1.5 x ATR14
@@ -81,9 +83,12 @@ CONFIG = {
 
     # ---- entry rules (see module docstring) ----
     "strategy": {
-        "mode": "EXT",                      # ORB | EXT | MOM
-        "win_start": "13:00",               # afternoon gamma window; use 09:30-11:00 for morning
+        "mode": "ANCHOR",                   # ANCHOR (time-anchored breakouts) | ORB | EXT | MOM
+        "win_start": "09:30",               # ANCHOR mode uses its own windows below; this is the outer limit
         "win_end": "14:45",
+        # time-anchored breakouts: (anchor time, minutes of range before it, minutes allowed to break after it)
+        #   09:30 = break of the 09:15-09:30 range | 12:00 = break of 11:30-12:00 | 14:00 = break of 13:30-14:00
+        "anchors": [("09:30", 15, 90), ("12:00", 30, 90), ("14:00", 30, 45)],
         "otm_steps": 1,                     # preferred strike: 0 = ATM, 1 or 2 = OTM
         "max_otm_steps": 2,
         "min_premium": 20,
@@ -132,6 +137,7 @@ def compile_strategy(s: dict) -> dict:
     out = dict(s)
     for k in ("win_start", "win_end", "orb_end"):
         out[k] = _m(s[k])
+    out["anchors"] = [(_m(a), int(w), int(sp)) for a, w, sp in s.get("anchors", [])]
     return out
 
 
@@ -226,13 +232,18 @@ def day_features(candles, S):
             hi_prior[i], lo_prior[i] = hh, ll
         hh, ll = max(hh, h[i]), min(ll, l[i])
 
+    anchor = {}
+    for A, w, _sp in S.get("anchors", []):
+        idx = [i for i in range(n) if A - w < mclose[i] <= A]
+        anchor[A] = (max(h[i] for i in idx), min(l[i] for i in idx)) if len(idx) >= 0.8 * w else None
+
     orb_idx = [i for i in range(n) if mclose[i] <= S["orb_end"]]
     orb_hi = max(h[i] for i in orb_idx) if orb_idx else None
     orb_lo = min(l[i] for i in orb_idx) if orb_idx else None
     return {"n": n, "ts": ts, "o": o, "h": h, "l": l, "c": c_, "mclose": mclose, "atr": atr,
             "ema_f": ema(c_, S["ema_fast"]), "ema_s": ema(c_, S["ema_slow"]), "vwap": vwap,
             "hi_prior": hi_prior, "lo_prior": lo_prior, "orb_hi": orb_hi, "orb_lo": orb_lo,
-            "orb_n": len(orb_idx)}
+            "orb_n": len(orb_idx), "anchor": anchor}
 
 
 def signal(f, i, S):
@@ -263,6 +274,15 @@ def signal(f, i, S):
             return "CE"
         if dn and c < f["orb_lo"] and pc >= f["orb_lo"]:
             return "PE"
+    elif mode == "ANCHOR":
+        pc = f["c"][i - 1]
+        for A, _w, span in S["anchors"]:
+            if A < t <= A + span and f["anchor"].get(A):
+                hi, lo = f["anchor"][A]
+                if up and c > hi and pc <= hi:
+                    return "CE"
+                if dn and c < lo and pc >= lo:
+                    return "PE"
     elif mode == "EXT":
         if up and c > f["hi_prior"][i]:
             return "CE"

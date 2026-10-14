@@ -454,6 +454,54 @@ open(eb.TRADE_LOG, "a").write(f"{g.now_ist().date()},NIFTY,x,CE,1,t,1,t,1,-8000,
 check("monthly guard: -13,000 (> 6% of capital) -> halted, no entries",
       "monthly" in (bot2.halted() or "") and not bot2.can_enter("NIFTY", at(13, 30)), f"{bot2.halted()}")
 
+# ---------------------------------------------------------------------------
+print("\n[11] Time-anchored breakouts (09:30 / 12:00 / 14:00)")
+SA = eb.compile_strategy(dict(CFG["strategy"], mode="ANCHOR", mtf_tfs=[]))
+check("three anchors configured: 09:30, 12:00, 14:00", [a for a, _, _ in SA["anchors"]] == [570, 720, 840], f"{SA['anchors']}")
+
+
+def anchor_day(break_minute, direction, flat=100.0):
+    """Quiet, slowly drifting day; a 25-point range is formed BEFORE break_minute, then a break of the range."""
+    bars, px = [], 25000.0
+    for i in range(375):
+        m = 555 + i + 1                                          # close minute of bar i
+        o = px
+        if break_minute - 30 < m <= break_minute:                 # the range window: oscillate +-12
+            c_ = 25000 + (12 if i % 2 else -12)
+        elif m == break_minute + 1:                               # break bar closes outside the range
+            c_ = 25000 + direction * 40
+        elif m > break_minute + 1:
+            c_ = 25000 + direction * (40 + (m - break_minute) * 0.3)
+        else:
+            c_ = 25000 + direction * (m - 555) * 0.02             # gentle drift with the trade direction
+        px = c_
+        bars.append([start + 60 * i, o, max(o, c_) + 0.5, min(o, c_) - 0.5, c_, 0])
+    return bars
+
+
+for anchor, label in ((720, "12:00"), (840, "14:00")):
+    for direction, want in ((1, "CE"), (-1, "PE")):
+        bars_ = anchor_day(anchor, direction)
+        S_one = eb.compile_strategy(dict(CFG["strategy"], mode="ANCHOR", mtf_tfs=[],
+                                         anchors=[x for x in CFG["strategy"]["anchors"] if eb._m(x[0]) == anchor]))
+        fa = eb.day_features(bars_, S_one)
+        sigs = [(i, eb.signal(fa, i, S_one)) for i in range(len(bars_)) if eb.signal(fa, i, S_one)]
+        first_close = fa["mclose"][sigs[0][0]] if sigs else None
+        check(f"{label} range break {'up' if direction > 0 else 'down'} -> {want} on the first bar after the anchor",
+              bool(sigs) and sigs[0][1] == want and first_close == anchor + 1, f"{sigs[:2]} closes {first_close}")
+SA14 = eb.compile_strategy(dict(CFG["strategy"], mode="ANCHOR", mtf_tfs=[], anchors=[("14:00", 30, 45)]))
+fb = eb.day_features(anchor_day(840, 1), SA14)
+check("no signal before the 14:00 anchor completes", all(eb.signal(fb, i, SA14) is None for i in range(len(fb["c"])) if fb["mclose"][i] <= 840))
+fb = eb.day_features(anchor_day(720, 1), SA14)
+check("with only the 14:00 anchor on, the 12:00 breakout bars give no signal",
+      all(eb.signal(fb, i, SA14) is None for i in range(len(fb["c"])) if 720 < fb["mclose"][i] <= 810))
+Sx = eb.compile_strategy(dict(CFG["strategy"], mode="ANCHOR", mtf_tfs=[]))
+b_full, b_cut = anchor_day(720, 1), anchor_day(720, 1)[:340]
+ff, fc = eb.day_features(b_full, Sx), eb.day_features(b_cut, Sx)
+check("ANCHOR: signal on a bar does not depend on later bars", all(eb.signal(ff, i, Sx) == eb.signal(fc, i, Sx) for i in range(340)))
+fz = eb.day_features(anchor_day(840, 1)[:100], Sx)
+check("incomplete range (data missing) -> no anchor, no trade", fz["anchor"].get(840) is None)
+
 shutil.rmtree(TMP, ignore_errors=True)
 print(f"\nRESULT: {passed} passed, {failed} failed")
 sys.exit(1 if failed else 0)

@@ -10,7 +10,8 @@ Options: expired option prices do not exist, so premiums are MODELLED:
            slippage >= 2% per side, and full charges (brokerage, STT, exchange, SEBI, GST, stamp).
          If one bar touches both stop and target, the STOP is assumed to hit first.
 Multi-timeframe: entries need the 5m/15m(/1h) EMA9-vs-EMA21 trend (built from 1-min data across days) to agree.
-Honesty: 20 simple variants are evaluated on the TUNE half only; the best by profit factor is frozen
+Strategies: time-anchored breakouts at 09:30 / 12:00 / 14:00 (alone and all three together).
+Honesty: 16 simple variants are evaluated on the TUNE half only; the best by profit factor is frozen
          and run on the TEST half with nothing changed. All 20 are shown on both halves for transparency.
          The verdict says plainly if there is no edge. Nothing is tuned to look good.
 
@@ -54,7 +55,7 @@ BT = {
                   "SENSEX": [(dt.date(2000, 1, 1), 20)]},                         # VERIFY: exchange circulars
 }
 
-MORNING, MID, AFTERNOON = "09:30-11:00", "11:00-13:00", "13:00-14:45"
+MORNING, MID, AFTERNOON = "09:30 breakout", "12:00 breakout", "14:00 breakout"
 
 
 def lot_size(index, day, bt):
@@ -67,7 +68,7 @@ def lot_size(index, day, bt):
 
 def window_of(hhmm):
     m = eb._m(hhmm)
-    return MORNING if m < 660 else MID if m < 780 else AFTERNOON
+    return MORNING if m < 660 else MID if m < 810 else AFTERNOON
 
 
 # =====================================================================================
@@ -370,17 +371,16 @@ class Market:
 # =====================================================================================
 # Variants and statistics
 # =====================================================================================
+ANCH = {"09:30": ("09:30", 15, 90), "12:00": ("12:00", 30, 90), "14:00": ("14:00", 30, 45)}
 VARIANTS = []
-for (label, ov), mtf, otm in itertools.product([
-        ("ORB morning", {"mode": "ORB", "win_start": "09:30", "win_end": "11:00"}),
-        ("EXT afternoon", {"mode": "EXT", "win_start": "13:00", "win_end": "14:45"}),
-        ("MOM morning", {"mode": "MOM", "win_start": "09:30", "win_end": "11:00"}),
-        ("MOM afternoon", {"mode": "MOM", "win_start": "13:00", "win_end": "14:45"}),
-        ("MOM all-day", {"mode": "MOM", "win_start": "09:30", "win_end": "14:45"})],
+for (label, keys), mtf, otm in itertools.product([
+        ("09:30 breakout", ["09:30"]), ("12:00 breakout", ["12:00"]), ("14:00 breakout", ["14:00"]),
+        ("All three (09:30+12:00+14:00)", ["09:30", "12:00", "14:00"])],
         [[5, 15], [5, 15, 60]], [0, 1]):
     # multi-timeframe confirmation is ALWAYS on (5m+15m, or 5m+15m+1h); breakeven is compared separately afterwards
     VARIANTS.append({"name": f"{label} | {'ATM' if otm == 0 else '1-OTM'} | MTF {'+'.join(str(x) if x < 60 else '1h' for x in mtf)}",
-                     "ov": {**ov, "otm_steps": otm, "mtf_tfs": mtf}, "be": False})
+                     "ov": {"mode": "ANCHOR", "anchors": [ANCH[k] for k in keys], "win_start": "09:30", "win_end": "14:45",
+                            "otm_steps": otm, "mtf_tfs": mtf}, "be": False})
 
 
 def stats(tr, capital=None):
@@ -580,7 +580,7 @@ def build_report(mkt, label, split, chosen, tune_tr, test_tr, grid, sens, be_cmp
                        f"<td>{b['profit_factor']:.2f}</td><td class='{cls(b['net'])}'>{money(b['net'])}</td></tr>"
                        for n, a, b in mtf_cmp)
     ov = chosen["ov"]
-    snippet = (f'"strategy": {{"mode": "{ov["mode"]}", "win_start": "{ov["win_start"]}", "win_end": "{ov["win_end"]}", '
+    snippet = (f'"strategy": {{"mode": "{ov["mode"]}", "anchors": {ov.get("anchors")}, "win_start": "{ov["win_start"]}", "win_end": "{ov["win_end"]}", '
                f'"otm_steps": {ov["otm_steps"]}, "mtf_tfs": {ov["mtf_tfs"]}, ...}},   "breakeven_enabled": {chosen["be"]}')
     page = f"""<!doctype html><html><head><meta charset="utf-8"><title>Expiry Blast Backtest</title>
 <meta name="viewport" content="width=device-width,initial-scale=1"><style>{CSS}</style></head><body>

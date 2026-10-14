@@ -117,7 +117,7 @@ Separate strategy with its own CONFIG. Reuses the login, broker wrapper, symbol 
 | Limits | 2 trades per index per day, 1 open position per index |
 | Time | No entries after 14:45, square-off 15:15 |
 | Risk | 1% of capital per trade; skipped if 1 lot risks more |
-| Entry modes | `ORB` opening-range break, `EXT` day-high/low break, `MOM` momentum candle (all need VWAP side + EMA9/21 direction) |
+| Entry modes | `ANCHOR` (default) = **time-anchored breakouts**: 09:30 (break of the 09:15-09:30 range, allowed until 11:00), 12:00 (break of 11:30-12:00, until 13:30), 14:00 (break of 13:30-14:00, until 14:45) - switch each on/off in `anchors`; also `ORB` opening-range break, `EXT` day-high/low break, `MOM` momentum candle (all need VWAP side + EMA9/21 direction) |
 | Multi-timeframe | The **5-minute, 15-minute and 1-hour** charts must all trend the same way as the trade (EMA9 vs EMA21 of completed bars, built from 1-minute data across days; `mtf_tfs` in CONFIG, `[]` = off). The backtest shows what the filter does versus 1-minute only. |
 
 Files: `expiry_blast.py` (bot + shared signal code), `expiry_backtest.py`, `expiry_recorder.py`, `test_expiry_offline.py`, and Mac launchers `expiry_blast.command`, `expiry_backtest.command`, `expiry_recorder.command` (right-click > Open the first time). `stop.command` stops it too.
@@ -142,3 +142,5 @@ Files: `expiry_blast.py` (bot + shared signal code), `expiry_backtest.py`, `expi
 ---
 
 **Read `SUCCESS_PLAN.md`** - a phased plan (record, paper, tiny live, scale) with go/no-go gates and hard rules based on your own trade statement. The bot enforces daily loss (2%), 3-losses-in-a-row and monthly loss (6%) guards (`max_daily_loss_pct`, `max_consecutive_losses`, `max_monthly_loss_pct` in `expiry_blast.py`).
+
+**Time-anchored strategies (09:30 / 12:00 / 14:00):** `signal_lab` measures whether the index really moves after each break (raw, all days, plus an expiry-days-only column); `expiry_backtest` runs each window alone and all three together, always with the 5m/15m(/1h) trend filter, and `expiry_blast` executes whichever `anchors` you leave in CONFIG.

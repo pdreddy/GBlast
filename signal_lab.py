@@ -6,11 +6,11 @@ option prices right?". The second depends on assumptions I make up. This lab ans
 real 1-minute NIFTY / SENSEX candles. If nothing predicts the index, no option strategy built on it can work.
 
 Method (fixed in advance, nothing tuned):
-  * 8 pre-declared signals, each fires at most ONCE per day per index (no overlapping samples).
+  * 14 pre-declared signals (the 09:30 / 12:00 / 14:00 time-anchored breakouts, momentum candles in those windows, and 8 others), each fires at most ONCE per day per index (no overlapping samples).
   * After a signal, entry = next bar open; we measure the signed index move (basis points, in the signal's
     direction) after 15 / 30 / 60 minutes (or until 15:15, whichever is first).
   * Both indices are pooled (more samples), and the year is split: first half = discovery, second half = unseen test.
-  * 8 signals x 3 horizons = 24 pooled tests. Testing many things produces false positives by luck, so a
+  * 14 signals x 3 horizons = 42 pooled tests. Testing many things produces false positives by luck, so a
     result only "passes" if |t| >= 2.5 on discovery AND the SAME sign with |t| >= 1.65 on the unseen half.
     The report prints how many passes chance alone would give.
   * A "fade" is just a negative result for a "follow" signal; the sign of the mean tells you which.
@@ -117,7 +117,45 @@ def sig_trend_all(f, i, ctx):
     return 0
 
 
-SIGNALS = [("ORB break (09:30-11:00)", sig_orb), ("Day-high/low break (13:00-14:45)", sig_ext_pm),
+def make_anchor(A_str):
+    """Raw (unfiltered) break of the range before an anchor time, within the span after it. Follow = +, fade = negative mean."""
+    spec = [x for x in S0["anchors"] if x[0] == eb._m(A_str)][0]
+    A, _w, span = spec
+
+    def fn(f, i, ctx):
+        t = f["mclose"][i]
+        rng = f["anchor"].get(A)
+        if not rng or not (A < t <= A + span):
+            return 0
+        c, pc = f["c"][i], f["c"][i - 1]
+        if c > rng[0] >= pc:
+            return 1
+        if c < rng[1] <= pc:
+            return -1
+        return 0
+    return fn
+
+
+def make_window_mom(lo, hi):
+    """Momentum candle (body>=60% of range, range>=1.5xATR) inside a clock window."""
+    def fn(f, i, ctx):
+        atr = f["atr"][i]
+        if not atr or not (lo <= f["mclose"][i] <= hi):
+            return 0
+        rng, body = f["h"][i] - f["l"][i], abs(f["c"][i] - f["o"][i])
+        if rng >= 1.5 * atr and rng > 0 and body >= 0.6 * rng:
+            return 1 if f["c"][i] > f["o"][i] else -1
+        return 0
+    return fn
+
+
+SIGNALS = [("09:30 break of 09:15-09:30 range", make_anchor("09:30")),
+           ("12:00 break of 11:30-12:00 range", make_anchor("12:00")),
+           ("14:00 break of 13:30-14:00 range", make_anchor("14:00")),
+           ("Momentum candle 09:30-11:00", make_window_mom(570, 660)),
+           ("Momentum candle 12:00-13:30", make_window_mom(720, 810)),
+           ("Momentum candle 14:00-14:45", make_window_mom(840, 885)),
+           ("ORB break (09:30-11:00)", sig_orb), ("Day-high/low break (13:00-14:45)", sig_ext_pm),
            ("Momentum candle (body>=60%, range>=1.5xATR)", sig_mom), ("Far from VWAP (>=5 ATR)", sig_vwap_dev),
            ("Opening gap >=0.3% (at 09:30)", sig_gap), ("First-30-min move >=0.25% (at 09:45)", sig_open30),
            ("5m/15m/1h trend pullback to EMA21", sig_mtf_pullback), ("5m+15m+1h all agree + VWAP side", sig_trend_all)]
@@ -132,8 +170,10 @@ def build_events(data, indices):
         full = [c for d in sorted(days) for c in days[d]]
         trend = eb.htf_trend(full, (5, 15, 60))
         prev_close = None
+        cal = bt0.ExpiryCalendar(sorted(days))
         for d in sorted(days):
             bars = days[d]
+            is_exp = cal.nearest(k, d) == d
             if len(bars) < 100:
                 prev_close = bars[-1][4] if bars else prev_close
                 continue
@@ -153,7 +193,7 @@ def build_events(data, indices):
                         j = min(i + 1 + H, len(bars) - 1)
                         j = min(j, max(x for x in range(len(bars)) if f["mclose"][x] <= 915))
                         events.append({"signal": name, "horizon": H, "index": k, "date": d.isoformat(),
-                                       "bps": s * (bars[j][1] / entry - 1) * 1e4})
+                                       "bps": s * (bars[j][1] / entry - 1) * 1e4, "exp": is_exp})
                     break                                                  # one firing per day per signal
             prev_close = bars[-1][4]
     return events
@@ -177,9 +217,10 @@ def analyse(events, split):
             a = tstats([e["bps"] for e in ev if e["date"] < cut])
             b = tstats([e["bps"] for e in ev if e["date"] >= cut])
             per = {k: tstats([e["bps"] for e in ev if e["index"] == k]) for k in sorted({e["index"] for e in ev})}
+            ex = tstats([e["bps"] for e in ev if e.get("exp")])
             passed = (abs(a["t"]) >= T_DISCOVERY and a["n"] >= 25 and b["n"] >= 25 and
                       (a["mean"] > 0) == (b["mean"] > 0) and abs(b["t"]) >= T_TEST)
-            rows.append({"signal": name, "H": H, "disc": a, "test": b, "per": per, "pass": passed,
+            rows.append({"signal": name, "H": H, "disc": a, "test": b, "per": per, "exp": ex, "pass": passed,
                          "side": "FOLLOW" if a["mean"] > 0 else "FADE"})
     return rows
 
@@ -206,7 +247,8 @@ def report(rows, label, split, days, path, n_events):
 
     trs = ""
     for r in rows:
-        per = " · ".join(f"{k} {v['mean']:+.1f}" for k, v in r["per"].items())
+        per = " · ".join(f"{k} {v['mean']:+.1f}" for k, v in r["per"].items()) + \
+            f" · expiry days only: {r['exp']['mean']:+.1f} (n={r['exp']['n']})"
         mark = "<b class='pos'>PASS</b>" if r["pass"] else ""
         trs += (f"<tr{' class=sel' if r['pass'] else ''}><td>{html.escape(r['signal'])}</td><td>{r['H']}m</td>"
                 f"{cell(r['disc'])}{cell(r['test'])}<td>{mark}</td><td class='tx'>{per}</td></tr>")
