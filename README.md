@@ -144,3 +144,8 @@ Files: `expiry_blast.py` (bot + shared signal code), `expiry_backtest.py`, `expi
 **Read `SUCCESS_PLAN.md`** - a phased plan (record, paper, tiny live, scale) with go/no-go gates and hard rules based on your own trade statement. The bot enforces daily loss (2%), 3-losses-in-a-row and monthly loss (6%) guards (`max_daily_loss_pct`, `max_consecutive_losses`, `max_monthly_loss_pct` in `expiry_blast.py`).
 
 **Time-anchored strategies (09:30 / 12:00 / 14:00):** `signal_lab` measures whether the index really moves after each break (raw, all days, plus an expiry-days-only column); `expiry_backtest` runs each window alone and all three together, always with the 5m/15m(/1h) trend filter, and `expiry_blast` executes whichever `anchors` you leave in CONFIG.
+
+
+# Pattern Lab (chart patterns, win rate vs payoff)
+
+`pattern_lab.command` (or `python3 pattern_lab.py`) tests 8 confirmed chart patterns on 5-minute bars built from your real data: inside-bar break, flag, double bottom/top, higher-high/higher-low pullback, engulfing at a real level, **failed-breakout trap (fade)**, opening-range retest, NR7 squeeze. Each is traded with stop = 1 ATR(5m) and targets of 0.5R / 1R / 2R, minus a cost of 0.15R, and reported with win rate, **break-even win rate (1/(1+RR))**, net R per trade and a t-statistic, discovery half vs unseen half. A high win rate only counts if it beats break-even on both halves. `--demo null|trend` self-checks it.
