@@ -10,6 +10,7 @@ Options: expired option prices do not exist, so premiums are MODELLED:
            slippage >= 2% per side, and full charges (brokerage, STT, exchange, SEBI, GST, stamp).
          If one bar touches both stop and target, the STOP is assumed to hit first.
 Multi-timeframe: entries need the 5m/15m(/1h) EMA9-vs-EMA21 trend (built from 1-min data across days) to agree.
+Days: expiry day and non-expiry days (nearest weekly expiry; IV = VIX x iv_mult_nonexp); auto trailing stop after +10%.
 Strategies: time-anchored breakouts at 09:30 / 12:00 / 14:00 (alone and all three together).
 Honesty: 16 simple variants are evaluated on the TUNE half only; the best by profit factor is frozen
          and run on the TEST half with nothing changed. All 20 are shown on both halves for transparency.
@@ -46,6 +47,7 @@ BT = {
     "iv_mult_open": 1.35,        # expiry-day ATM IV runs well above India VIX (VIX blends later expiries)...
     "iv_mult_close": 1.00,       # ...and fades through the day
     "iv_extra_fade": 0.15,       # additional IV fade between 13:00 and 15:30 (theta acceleration)
+    "iv_mult_nonexp": 1.00,      # NON-expiry days: option IV = India VIX x this, flat through the day
     "slippage_pct": 2.0,         # per side, applied to entries AND every exit (stop, target, square-off)
     "risk_free": 0.065,
     "brokerage_per_order": 20.0,
@@ -210,9 +212,15 @@ def iv_for(vix_pct, minute, bt):
     return vix_pct / 100 * mult * (1 - bt["iv_extra_fade"] * late)
 
 
-def premium(spot, K, minute, vix_pct, cp, bt):
-    T = max(DAY_CLOSE - minute, 0.5) / YEAR_MIN
-    return max(eb.g.bs_price(spot, K, T, bt["risk_free"], iv_for(vix_pct, minute, bt), cp), 0.05)
+def premium(spot, K, minute, vix_pct, cp, bt, dte=0):
+    """dte = calendar days between today and the contract's expiry date (0 = expiry day)."""
+    if dte > 0:
+        T = (dte * 1440 + max(DAY_CLOSE - minute, 0.5)) / YEAR_MIN
+        iv = vix_pct / 100 * bt["iv_mult_nonexp"]
+    else:
+        T = max(DAY_CLOSE - minute, 0.5) / YEAR_MIN
+        iv = iv_for(vix_pct, minute, bt)
+    return max(eb.g.bs_price(spot, K, T, bt["risk_free"], iv, cp), 0.05)
 
 
 def charges(index, entry, exit_, qty, day, bt):
@@ -264,14 +272,19 @@ def null_market(indices, n_days, seed=11):
 # =====================================================================================
 # Simulator (one index, one expiry day)
 # =====================================================================================
-def simulate_day(index, day, bars, feat, vix_at, S, ex, bt, cfg):
-    """S = compiled strategy, ex = {'breakeven': bool}. Returns list of trade dicts."""
+def simulate_day(index, day, bars, feat, vix_at, S, ex, bt, cfg, dte=0):
+    """S = compiled strategy, ex = {'breakeven': bool, 'trail': (trigger_pct, gap_pct) or None, 'skips': int}.
+    dte = days to the traded expiry (0 on expiry day). Returns list of trade dicts."""
     trades, pos, pending, n_trades = [], None, None, 0
     lot = lot_size(index, day, bt)
     step = cfg["indices"][index]["strike_step"]
     slip = bt["slippage_pct"] / 100
     sq_min, entry_end = eb._m(cfg["square_off"]), eb._m(cfg["entry_end"])
     sl_pct, tg_pct = cfg["stop_loss_pct"], cfg["target_pct"]
+    trail = ex.get("trail")
+    prem = lambda spot, K, m, vx, cp: premium(spot, K, m, vx, cp, bt, dte)
+    if dte > 0:                                                    # longer-dated options cost more: separate premium band
+        S = {**S, "min_premium": S.get("min_premium_ne", S["min_premium"]), "max_premium": S.get("max_premium_ne", S["max_premium"])}
 
     def close_out(minute, raw_px, reason):
         nonlocal pos
@@ -279,7 +292,7 @@ def simulate_day(index, day, bars, feat, vix_at, S, ex, bt, cfg):
         gross = (fill - pos["entry"]) * pos["qty"]
         cst = charges(index, pos["entry"], fill, pos["qty"], day, bt)
         trades.append({
-            "date": day.isoformat(), "index": index, "type": pos["cp"], "strike": pos["K"],
+            "date": day.isoformat(), "index": index, "dte": dte, "type": pos["cp"], "strike": pos["K"],
             "entry_time": pos["t_in"], "exit_time": f"{minute // 60:02d}:{minute % 60:02d}",
             "window": window_of(pos["t_in"]), "spot_in": round(pos["spot_in"], 2), "lots": pos["lots"],
             "qty": pos["qty"], "entry": round(pos["entry"], 2), "exit": round(fill, 2),
@@ -294,7 +307,7 @@ def simulate_day(index, day, bars, feat, vix_at, S, ex, bt, cfg):
 
         # 1. pending entry fills at this bar's open
         if pending and pos is None:
-            p_open = premium(o_s, pending["K"], t, vix, pending["cp"], bt)
+            p_open = prem(o_s, pending["K"], t, vix, pending["cp"])
             pending_ = pending
             pending = None
             if S["min_premium"] <= p_open <= S["max_premium"]:
@@ -304,37 +317,43 @@ def simulate_day(index, day, bars, feat, vix_at, S, ex, bt, cfg):
                 if lots >= 1:
                     pos = {"cp": pending_["cp"], "K": pending_["K"], "entry": fill, "lots": lots,
                            "qty": lots * lot, "sl": fill * (1 - sl_pct / 100), "tgt": fill * (1 + tg_pct / 100),
-                           "peak": fill, "be": False, "t_in": f"{t // 60:02d}:{t % 60:02d}", "spot_in": o_s}
+                           "peak": fill, "be": False, "trail_on": False,
+                           "t_in": f"{t // 60:02d}:{t % 60:02d}", "spot_in": o_s}
                     n_trades += 1
+                else:
+                    ex["skips"] = ex.get("skips", 0) + 1            # 1 lot would risk more than the 1% budget
 
         # 2. manage the open position through this bar
         if pos:
             tm = t + 0.5
             fav_s, adv_s = (h_s, l_s) if pos["cp"] == "CE" else (l_s, h_s)
-            pr_open = premium(o_s, pos["K"], t, vix, pos["cp"], bt)
-            pr_fav = premium(fav_s, pos["K"], tm, vix, pos["cp"], bt)
-            pr_adv = premium(adv_s, pos["K"], tm, vix, pos["cp"], bt)
+            pr_open = prem(o_s, pos["K"], t, vix, pos["cp"])
+            pr_fav = prem(fav_s, pos["K"], tm, vix, pos["cp"])
+            pr_adv = prem(adv_s, pos["K"], tm, vix, pos["cp"])
             if t >= sq_min:
                 close_out(t, pr_open, "SQUARE_OFF")
             elif pr_adv <= pos["sl"]:                              # stop checked FIRST (worst case)
-                close_out(t, min(pos["sl"], pr_open), "BE" if pos["be"] else "SL")
+                close_out(t, min(pos["sl"], pr_open), "TRAIL" if pos["trail_on"] else "BE" if pos["be"] else "SL")
             elif pr_fav >= pos["tgt"]:
                 close_out(t, max(pos["tgt"], pr_open), "TARGET")
             else:
                 pos["peak"] = max(pos["peak"], pr_fav)
-                if ex["breakeven"] and not pos["be"] and \
-                        (pos["peak"] / pos["entry"] - 1) * 100 >= cfg["breakeven_trigger_pct"]:
-                    pos["be"], pos["sl"] = True, pos["entry"]       # effective from the NEXT bar
+                gain = (pos["peak"] / pos["entry"] - 1) * 100
+                if ex["breakeven"] and not pos["be"] and gain >= cfg["breakeven_trigger_pct"]:
+                    pos["be"], pos["sl"] = True, max(pos["sl"], pos["entry"])   # effective from the NEXT bar
+                if trail and gain >= trail[0]:                      # +10% reached: trailing stop below the peak
+                    new_sl = pos["peak"] * (1 - trail[1] / 100)
+                    if new_sl > pos["sl"]:
+                        pos["sl"], pos["trail_on"] = new_sl, True
                 if i == len(bars) - 1:                             # data ended before square-off
-                    close_out(t + 1, premium(c_s, pos["K"], t + 1, vix, pos["cp"], bt), "SQUARE_OFF")
+                    close_out(t + 1, prem(c_s, pos["K"], t + 1, vix, pos["cp"]), "SQUARE_OFF")
 
         # 3. look for a signal on this closed bar -> enter at next bar's open
         if pos is None and pending is None and n_trades < cfg["max_trades_per_index"] \
                 and t + 1 <= entry_end and i + 1 < len(bars):
             side = eb.signal(feat, i, S)
             if side:
-                pick = eb.pick_strike(c_s, side, step,
-                                      lambda K: premium(c_s, K, t + 1, vix, side, bt), S)
+                pick = eb.pick_strike(c_s, side, step, lambda K: prem(c_s, K, t + 1, vix, side), S)
                 if pick:
                     pending = {"cp": side, "K": pick[0]}
     return trades
@@ -360,12 +379,14 @@ class Market:
         for k in indices:
             cal = bt0.ExpiryCalendar(sorted(self.days_by_index[k]))
             self.expiry_days[k] = [d for d in sorted(self.days_by_index[k]) if cal.nearest(k, d) == d]
-        self.feat = {}
+        self.feat, self.dte = {}, {}
         for k in indices:
             full = [c for d in sorted(self.days_by_index[k]) for c in self.days_by_index[k][d]]
             trend = eb.htf_trend(full, (5, 15, 60))                 # 5m / 15m / 1h trend from ALL days (EMA warm-up)
-            for d in self.expiry_days[k]:
+            cal = bt0.ExpiryCalendar(sorted(self.days_by_index[k]))
+            for d in sorted(self.days_by_index[k]):
                 bars = self.days_by_index[k][d]
+                self.dte[(k, d)] = (cal.nearest(k, d) - d).days
                 if len(bars) >= 60:
                     f = eb.day_features(bars, self.S0)
                     f["mtf"] = [eb.mtf_signs_at(trend, b_[0] + 60) for b_ in bars]
@@ -381,14 +402,22 @@ class Market:
             return last[0]
         return at
 
-    def run(self, strategy_overrides, breakeven, bt=BT, start=None, end=None):
+    def run(self, strategy_overrides, breakeven, bt=BT, start=None, end=None, trail="cfg", days=None):
+        """trail: (trigger_pct, gap_pct), None = off, "cfg" = from CONFIG.  days: 'expiry' | 'non_expiry' | 'all' (default CONFIG)."""
         S = eb.compile_strategy({**self.cfg["strategy"], **strategy_overrides})
-        ex = {"breakeven": breakeven}
+        if trail == "cfg":
+            trail = (self.cfg["trail_trigger_pct"], self.cfg["trail_gap_pct"]) if self.cfg.get("trail_enabled") else None
+        days = days or self.cfg.get("trade_days", "expiry")
+        ex = {"breakeven": breakeven, "trail": trail, "skips": 0}
         out = []
         for (k, d), (bars, feat) in sorted(self.feat.items(), key=lambda x: (x[0][1], x[0][0])):
             if (start and d < start) or (end and d >= end):
                 continue
-            out += simulate_day(k, d, bars, feat, self.vix_fn(d), S, ex, bt, self.cfg)
+            dte = self.dte[(k, d)]
+            if (days == "expiry" and dte != 0) or (days == "non_expiry" and dte == 0):
+                continue
+            out += simulate_day(k, d, bars, feat, self.vix_fn(d), S, ex, bt, self.cfg, dte)
+        self.last_skips = ex["skips"]
         return out
 
 
@@ -577,7 +606,15 @@ def cards(s):
                                           for a, b in items) + "</div>"
 
 
-def build_report(mkt, label, split, chosen, tune_tr, test_tr, grid, sens, be_cmp, path, days, mtf_cmp=()):
+def cmp_html(rows):
+    body = "".join(f"<tr><td>{html.escape(n)}</td><td>{a['trades']}</td><td>{a['win_rate']:.0f}%</td><td>{a['profit_factor']:.2f}</td>"
+                   f"<td class='{cls(a['net'])}'>{money(a['net'])}</td><td>{b['trades']}</td><td>{b['win_rate']:.0f}%</td>"
+                   f"<td>{b['profit_factor']:.2f}</td><td class='{cls(b['net'])}'>{money(b['net'])}</td></tr>" for n, a, b in rows)
+    return ("<table><tr><th></th><th>Tune trades</th><th>Win</th><th>PF</th><th>Net</th><th>Test trades</th><th>Win</th><th>PF</th><th>Net</th></tr>"
+            + body + "</table>")
+
+
+def build_report(mkt, label, split, chosen, tune_tr, test_tr, grid, sens, be_cmp, path, days, mtf_cmp=(), extra=(), skips=0):
     cap = C["capital"]
     tune, test = stats(tune_tr), stats(test_tr)
     kind, headline, detail = verdict(tune, test)
@@ -603,6 +640,10 @@ def build_report(mkt, label, split, chosen, tune_tr, test_tr, grid, sens, be_cmp
                        f"<td class='{cls(a['net'])}'>{money(a['net'])}</td><td>{b['trades']}</td><td>{b['win_rate']:.0f}%</td>"
                        f"<td>{b['profit_factor']:.2f}</td><td class='{cls(b['net'])}'>{money(b['net'])}</td></tr>"
                        for n, a, b in mtf_cmp)
+    extra_html = "".join(f"<h2>{html.escape(t_)}</h2>{cmp_html(r_)}" for t_, r_ in extra)
+    extra_html += (f"<div class='note'><b>Risk cap effect:</b> {skips} otherwise-valid signals were skipped because 1 lot would risk more than "
+                   f"{C['risk_per_trade_pct']}% of capital (₹{C['capital'] * C['risk_per_trade_pct'] / 100:,.0f}). Longer-dated options cost more, so "
+                   f"with a small account most non-expiry-day signals are skipped; that is the rule working, not a bug.</div>")
     ov = chosen["ov"]
     snippet = (f'"strategy": {{"mode": "{ov["mode"]}", "anchors": {ov.get("anchors")}, "win_start": "{ov["win_start"]}", "win_end": "{ov["win_end"]}", '
                f'"otm_steps": {ov["otm_steps"]}, "mtf_tfs": {ov["mtf_tfs"]}, ...}},   "breakeven_enabled": {chosen["be"]}')
@@ -611,7 +652,8 @@ def build_report(mkt, label, split, chosen, tune_tr, test_tr, grid, sens, be_cmp
 <h1>Expiry Blast backtest {html.escape(label)}</h1>
 <div class="sub">{days[0]} to {days[-1]} · tune half: before {split} · test half: {split} onward (rules frozen) ·
 capital {money(cap)} · risk {C['risk_per_trade_pct']}%/trade · SL {C['stop_loss_pct']:.0f}% · target +{C['target_pct']:.0f}% ·
-slippage {BT['slippage_pct']}%/side + full charges · square-off {C['square_off']}</div>
+slippage {BT['slippage_pct']}%/side + full charges · square-off {C['square_off']} ·
+days traded: {C['trade_days']} · auto trail: {('+%g%% trigger, %g%% below peak' % (C['trail_trigger_pct'], C['trail_gap_pct'])) if C['trail_enabled'] else 'off'}</div>
 
 <div class="banner {kind}"><b>{html.escape(headline)}</b><br>{html.escape(detail)}</div>
 {("<div class='note'><b>DEMO DATA - NOT YOUR MARKET.</b> " + ("Pure random walk: no edge exists, so a losing result is the CORRECT outcome and shows the engine does not invent profits." if "null" in label else "Synthetic momentum bursts: an edge exists by construction, so a profitable result only shows the engine CAN detect one.") + " Put your real CSVs in <code>data/</code> and run again.</div>") if "DEMO" in label else ""}
@@ -644,6 +686,7 @@ The rules were not tuned toward any monthly target.</div>
 <h2>Higher-timeframe confirmation (5m / 15m / 1h EMA9 vs EMA21 must agree): what it does to the chosen entry</h2>
 <table><tr><th></th><th>Tune trades</th><th>Win</th><th>PF</th><th>Net</th><th>Test trades</th><th>Win</th><th>PF</th><th>Net</th></tr>{mtf_rows}</table>
 
+{extra_html}
 <h2>Breakeven stop at +60%: with vs without (same entries as chosen variant)</h2>
 <table><tr><th></th><th>Tune trades</th><th>Win</th><th>PF</th><th>Net</th><th>Test trades</th><th>PF</th><th>Net</th></tr>{be_rows}</table>
 
@@ -742,16 +785,33 @@ def main():
         mtf_cmp.append((name, stats([t for t in r if t["date"] < split.isoformat()]),
                         stats([t for t in r if t["date"] >= split.isoformat()])))
 
+    r0 = mkt.run(chosen["ov"], chosen["be"])
+    skips = mkt.last_skips
+    extra = []
+    rows_ = []
+    for name, tr_ in (("No trailing stop", None), ("Trail: +10% trigger, 10% below peak", (10, 10)),
+                      ("Trail: +10% trigger, 15% below peak (default)", (10, 15)), ("Trail: +10% trigger, 25% below peak", (10, 25))):
+        r = mkt.run(chosen["ov"], chosen["be"], trail=tr_)
+        rows_.append((name, stats([t for t in r if t["date"] < split.isoformat()]), stats([t for t in r if t["date"] >= split.isoformat()])))
+    extra.append(("Auto trailing stop after a +10% move: what it does to the chosen entry", rows_))
+    rows_ = []
+    for name, dd in (("Expiry day only", "expiry"), ("Non-expiry days only", "non_expiry"), ("All days", "all")):
+        r = mkt.run(chosen["ov"], chosen["be"], days=dd)
+        rows_.append((name, stats([t for t in r if t["date"] < split.isoformat()]), stats([t for t in r if t["date"] >= split.isoformat()])))
+    extra.append(("Which days: expiry day vs non-expiry days (chosen entry)", rows_))
+
     sens = []
     for name, ch in (("Baseline (as reported)", {}), ("Slippage 3% per side", {"slippage_pct": 3.0}),
                      ("Slippage 4% per side", {"slippage_pct": 4.0}),
                      ("Expiry IV 15% lower", {"iv_mult_open": BT["iv_mult_open"] * .85, "iv_mult_close": BT["iv_mult_close"] * .85}),
                      ("Expiry IV 15% higher", {"iv_mult_open": BT["iv_mult_open"] * 1.15, "iv_mult_close": BT["iv_mult_close"] * 1.15}),
-                     ("No expiry IV adj. (IV = VIX)", {"iv_mult_open": 1.0, "iv_mult_close": 1.0, "iv_extra_fade": 0.0})):
+                     ("No expiry IV adj. (IV = VIX)", {"iv_mult_open": 1.0, "iv_mult_close": 1.0, "iv_extra_fade": 0.0}),
+                     ("Non-expiry-day IV 15% lower", {"iv_mult_nonexp": BT["iv_mult_nonexp"] * .85}),
+                     ("Non-expiry-day IV 15% higher", {"iv_mult_nonexp": BT["iv_mult_nonexp"] * 1.15})):
         r = mkt.run(chosen["ov"], chosen["be"], bt={**BT, **ch}, start=split)
         sens.append((name, stats(r)))
 
-    build_report(mkt, label, split, chosen, tune_tr, test_tr, grid, sens, be_cmp, out_html, days, mtf_cmp)
+    build_report(mkt, label, split, chosen, tune_tr, test_tr, grid, sens, be_cmp, out_html, days, mtf_cmp, extra, skips)
     all_tr = tune_tr + test_tr
     if all_tr:
         with open("expiry_trades.csv", "w", newline="") as f:

@@ -72,6 +72,13 @@ CONFIG = {
     "target_pct": 100.0,
     "breakeven_enabled": False,             # test with and without (the backtest does both)
     "breakeven_trigger_pct": 60.0,          # at +60% move the stop to entry
+    # auto trailing stop: once the option is up trail_trigger_pct, the stop follows trail_gap_pct below the peak premium
+    "trail_enabled": True,
+    "trail_trigger_pct": 10.0,
+    "trail_gap_pct": 15.0,
+    "trail_min_step_pct": 1.0,              # only modify the broker SL if it rises >= 1% of entry
+    # which days: "expiry" = expiry day only, "non_expiry" = other days (nearest weekly), "all" = both
+    "trade_days": "all",
     "sl_limit_buffer_pct": 5.0,             # SL-L limit price this % below the trigger
     "gap_fallback_pct": 8.0,                # LTP this % below SL while SL still pending -> force exit
     "paper_slippage_pct": 2.0,              # paper fills are made worse by this % per side
@@ -91,8 +98,10 @@ CONFIG = {
         "anchors": [("09:30", 15, 90), ("12:00", 30, 90), ("14:00", 30, 45)],
         "otm_steps": 1,                     # preferred strike: 0 = ATM, 1 or 2 = OTM
         "max_otm_steps": 2,
-        "min_premium": 20,
+        "min_premium": 20,                  # expiry day premium band (Rs)
         "max_premium": 150,
+        "min_premium_ne": 20,               # other days: options have more time value, so a wider band
+        "max_premium_ne": 600,
         "ema_fast": 9, "ema_slow": 21,
         "atr_period": 14, "atr_mult": 1.5,  # MOM: range >= 1.5 x ATR14
         "body_ratio": 0.6,                  # MOM: body >= 60% of range
@@ -450,10 +459,16 @@ class ExpiryBlast(g.GammaBlast):
     # ---------------- scan & enter ----------------
     def scan(self, name, now):
         expiry = self.master.nearest_expiry(name, now)
-        if not expiry or expiry.date() != now.date():          # EXPIRY DAY ONLY
+        if not expiry:
+            return
+        is_exp = expiry.date() == now.date()
+        td = self.cfg.get("trade_days", "expiry")
+        if (td == "expiry" and not is_exp) or (td == "non_expiry" and is_exp):
             return
         if not self.can_enter(name, now, expiry):
             return
+        S = self.S if is_exp else {**self.S, "min_premium": self.S.get("min_premium_ne", self.S["min_premium"]),
+                                   "max_premium": self.S.get("max_premium_ne", self.S["max_premium"])}
         ic = self.cfg["indices"][name]
         full = self._closed(self.broker.candles_range(ic["spot"], 8 if self.S.get("mtf_tfs") else 0))
         today0 = int(now.replace(hour=0, minute=0, second=0, microsecond=0).timestamp())
@@ -474,16 +489,16 @@ class ExpiryBlast(g.GammaBlast):
         rows = {k: chain[k] for k in want if k in chain}
         prices = self.broker.ltp([r.ticker for r in rows.values()])
         pick = pick_strike(spot, side, ic["strike_step"],
-                           lambda K: prices.get(rows[K].ticker) if K in rows else None, self.S)
+                           lambda K: prices.get(rows[K].ticker) if K in rows else None, S)
         if not pick:
             log.info("%s %s: no strike with premium in [%s, %s] - skip", name, side,
-                     self.S["min_premium"], self.S["max_premium"])
+                     S["min_premium"], S["max_premium"])
             return
         K, ltp = pick
         row = rows[K]
         fill_px = ltp * (1 + self.cfg["paper_slippage_pct"] / 100) if self.paper else ltp
         self.enter(name, side, row, g.round_tick(fill_px, row.tick),
-                   {"mode": self.S["mode"], "mtf": f.get("mtf", [None])[-1], "spot": spot, "ltp_seen": ltp, "expiry": expiry.strftime("%Y-%m-%d")})
+                   {"mode": self.S["mode"], "expiry_day": is_exp, "mtf": f.get("mtf", [None])[-1], "spot": spot, "ltp_seen": ltp, "expiry": expiry.strftime("%Y-%m-%d")})
 
     # ---------------- manage (-25% SL, +100% target, optional breakeven) ----------------
     def manage(self):
@@ -499,7 +514,7 @@ class ExpiryBlast(g.GammaBlast):
             if not self.paper and p.sl_order_id:
                 st, px = self.broker.status(p.sl_order_id)
                 if st == 2:
-                    self._close(name, px or p.sl, "BE" if p.trail_on else "SL", broker_done=True)
+                    self._close(name, px or p.sl, self._stop_label(p), broker_done=True)
                     continue
                 if st in (1, 5, 7):
                     log.warning("%s broker SL inactive (status %s) - re-placing", p.symbol, st)
@@ -519,15 +534,33 @@ class ExpiryBlast(g.GammaBlast):
                 log.info("BREAKEVEN %s peak %.2f -> SL %.2f", p.symbol, p.peak, p.sl)
                 self._save_state()
 
+            # auto trailing stop: after +trigger%, stop = peak premium minus gap% (only ever moves up)
+            if c.get("trail_enabled") and (p.peak / p.entry - 1) * 100 >= c["trail_trigger_pct"]:
+                new_sl = g.round_tick(p.peak * (1 - c["trail_gap_pct"] / 100), p.tick)
+                if new_sl - p.sl >= p.entry * c["trail_min_step_pct"] / 100:
+                    if not p.meta.get("trailing"):
+                        log.info("TRAIL ON %s peak %.2f (+%.0f%%)", p.symbol, p.peak, (p.peak / p.entry - 1) * 100)
+                    p.meta["trailing"], p.trail_on, p.sl = True, True, new_sl
+                    if not self.paper and p.sl_order_id:
+                        lim = g.round_tick(new_sl * (1 - c["sl_limit_buffer_pct"] / 100), p.tick)
+                        if not self.broker.modify_sl(p.sl_order_id, p.qty, new_sl, lim):
+                            log.warning("SL modify failed for %s", p.symbol)
+                    log.info("SL -> %.2f on %s", p.sl, p.symbol)
+                    self._save_state()
+
             if ltp >= p.target:
                 self._close(name, ltp * (1 - slip), "TARGET")
                 continue
             if self.paper or not p.sl_order_id:
                 if ltp <= p.sl:
-                    self._close(name, ltp * (1 - slip), "BE" if p.trail_on else "SL")
+                    self._close(name, ltp * (1 - slip), self._stop_label(p))
             elif ltp <= p.sl * (1 - c["gap_fallback_pct"] / 100):
                 log.warning("%s gapped through SL band - forcing exit", p.symbol)
                 self._close(name, ltp, "SL_GAP")
+
+    @staticmethod
+    def _stop_label(p):
+        return "TRAIL" if p.meta.get("trailing") else "BE" if p.trail_on else "SL"
 
     def flatten(self, reason):
         slip = self.cfg["paper_slippage_pct"] / 100 if self.paper else 0.0
@@ -542,11 +575,13 @@ class ExpiryBlast(g.GammaBlast):
         now = g.now_ist()
         today_expiries = {n: e.date() for n in c["indices"] if c["indices"][n]["enabled"]
                           for e in [self.master.nearest_expiry(n, now)] if e}
-        active = [n for n, d in today_expiries.items() if d == now.date()]
-        log.info("Expiry Blast | mode=%s | strategy=%s | expiry today: %s", "PAPER" if self.paper else "LIVE",
-                 c["strategy"]["mode"], active or "NONE")
+        td = c.get("trade_days", "expiry")
+        active = [n for n, d in today_expiries.items()
+                  if td == "all" or (td == "expiry" and d == now.date()) or (td == "non_expiry" and d != now.date())]
+        log.info("Expiry Blast | mode=%s | strategy=%s | trade_days=%s | trading today: %s | expiry dates: %s",
+                 "PAPER" if self.paper else "LIVE", c["strategy"]["mode"], td, active or "NONE", today_expiries)
         if not active and not self.positions:
-            log.info("No index expires today (%s) - nothing to do.", today_expiries)
+            log.info("Nothing to trade today under trade_days=%s.", td)
             return
         while True:
             now = g.now_ist()

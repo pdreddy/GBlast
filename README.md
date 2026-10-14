@@ -110,9 +110,9 @@ Separate strategy with its own CONFIG. Reuses the login, broker wrapper, symbol 
 
 | Rule | Setting |
 |---|---|
-| Days | Only the expiry day of each index, only the expiring contract |
+| Days | `trade_days`: `"expiry"` (expiry day only), `"non_expiry"` (other days, nearest weekly contract) or `"all"` (default) |
 | Strike | ATM or 1-2 OTM, premium must be Rs 20-150 |
-| Stop loss | -25% of entry, placed as a broker SL-L order right after entry |
+| Stop loss | -25% of entry, placed as a broker SL-L order right after entry. **Auto trailing stop:** once the option is up 10% the stop follows 15% below the peak premium (`trail_trigger_pct`, `trail_gap_pct`; the broker SL order is moved up) |
 | Target | +100% (1:4). Optional breakeven: at +60% stop moves to entry (`breakeven_enabled`) |
 | Limits | 2 trades per index per day, 1 open position per index |
 | Time | No entries after 14:45, square-off 15:15 |
@@ -149,3 +149,5 @@ Files: `expiry_blast.py` (bot + shared signal code), `expiry_backtest.py`, `expi
 # Pattern Lab (chart patterns, win rate vs payoff)
 
 `pattern_lab.command` (or `python3 pattern_lab.py`) tests 8 confirmed chart patterns on 5-minute bars built from your real data: inside-bar break, flag, double bottom/top, higher-high/higher-low pullback, engulfing at a real level, **failed-breakout trap (fade)**, opening-range retest, NR7 squeeze. Each is traded with stop = 1 ATR(5m) and targets of 0.5R / 1R / 2R, minus a cost of 0.15R, and reported with win rate, **break-even win rate (1/(1+RR))**, net R per trade and a t-statistic, discovery half vs unseen half. A high win rate only counts if it beats break-even on both halves. `--demo null|trend` self-checks it.
+
+**Non-expiry days + auto trailing stop:** `trade_days` lets the bot trade every day (nearest weekly contract; separate premium band `min/max_premium_ne`). The backtest prices non-expiry options with IV = VIX x `iv_mult_nonexp` and reports expiry-only vs non-expiry vs all days, trailing stop off / 10% / 15% / 25% gap, and how many signals the 1% risk cap skipped (longer-dated options cost more, so a small account skips many).

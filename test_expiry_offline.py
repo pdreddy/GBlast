@@ -65,8 +65,9 @@ class FakeBroker:
         return {s: self.px[s] for s in symbols if s in self.px}
 
 
-def new_bot(be=False):
-    cfg = dict(CFG, breakeven_enabled=be, capital=200000, paper_slippage_pct=0.0)
+def new_bot(be=False, **over):
+    cfg = {**CFG, "breakeven_enabled": be, "capital": 200000, "paper_slippage_pct": 0.0,
+           "trail_enabled": False, "trade_days": "expiry", **over}
     bot = eb.ExpiryBlast.__new__(eb.ExpiryBlast)
     bot.cfg, bot.paper, bot.broker = cfg, True, FakeBroker()
     bot.S = eb.compile_strategy(cfg["strategy"])
@@ -527,6 +528,94 @@ try:
     check("download aborts on auth error instead of silently continuing", False)
 except SystemExit:
     check("download aborts on auth error instead of silently continuing", True)
+
+# ---------------------------------------------------------------------------
+print("\n[13] +10% auto trailing stop and non-expiry days")
+check("trailing stop configured: trigger +10%", CFG["trail_enabled"] and CFG["trail_trigger_pct"] == 10.0 and CFG["trade_days"] == "all")
+bot = new_bot(trail_enabled=True, trail_trigger_pct=10.0, trail_gap_pct=15.0)
+bot.broker.px[SYM] = 100
+bot.enter("NIFTY", "CE", ROW, 100.0, {})
+bot.broker.px[SYM] = 109
+bot.manage()
+check("below +10%: stop still -25%", abs(bot.positions["NIFTY"].sl - 75.0) < 0.06, f"SL {bot.positions['NIFTY'].sl}")
+bot.broker.px[SYM] = 112
+bot.manage()
+check("at +12%: trail starts, SL = peak x 0.85 = 95.2", abs(bot.positions["NIFTY"].sl - 95.2) < 0.06, f"SL {bot.positions['NIFTY'].sl}")
+bot.broker.px[SYM] = 130
+bot.manage()
+check("peak 130 -> SL 110.5", abs(bot.positions["NIFTY"].sl - 110.5) < 0.06, f"SL {bot.positions['NIFTY'].sl}")
+bot.broker.px[SYM] = 120
+bot.manage()
+check("price falls back: stop never moves down", abs(bot.positions["NIFTY"].sl - 110.5) < 0.06, f"SL {bot.positions['NIFTY'].sl}")
+bot.broker.px[SYM] = 110
+bot.manage()
+last = list(csv.reader(open(eb.TRADE_LOG)))[-1]
+check("exit when price hits the trailed stop, labelled TRAIL, locked in a profit", last[11] == "TRAIL" and float(last[8]) >= 100, f"{last[11]} exit {last[8]}")
+bot = new_bot(trail_enabled=True)
+bot.paper = False
+bot.broker = LiveBroker()
+bot.broker.px[SYM] = 100
+bot.enter("NIFTY", "CE", ROW, 100.0, {})
+bot.broker.px[SYM] = 120
+bot.manage()
+check("live: trailing modifies the BROKER stop order", any(x[0] == "modify" and abs(x[2] - 102.0) < 0.06 for x in bot.broker.calls),
+      f"{[x for x in bot.broker.calls if x[0] == 'modify']}")
+
+# day scope
+bot = new_bot(trade_days="expiry")
+bot.master = FakeMaster(g.now_ist() + dt.timedelta(days=3))
+bot.broker.candles_range = lambda *a, **k: (_ for _ in ()).throw(AssertionError("fetched"))
+try:
+    bot.scan("NIFTY", at(13, 30))
+    check("trade_days=expiry ignores a non-expiry day", True)
+except AssertionError:
+    check("trade_days=expiry ignores a non-expiry day", False)
+bot = new_bot(trade_days="non_expiry")
+bot.master = FakeMaster(g.now_ist() + dt.timedelta(hours=2))      # expires today
+bot.broker.candles_range = lambda *a, **k: (_ for _ in ()).throw(AssertionError("fetched"))
+try:
+    bot.scan("NIFTY", at(13, 30))
+    check("trade_days=non_expiry ignores the expiry day", True)
+except AssertionError:
+    check("trade_days=non_expiry ignores the expiry day", False)
+if os.path.exists(eb.TRADE_LOG):
+    os.remove(eb.TRADE_LOG)                                          # earlier tests left losses that trip the monthly guard
+bot = new_bot(trade_days="all")
+bot.master = FakeMaster(g.now_ist() + dt.timedelta(days=3))
+fetched = []
+bot.broker.candles_range = lambda *a, **k: fetched.append(1) or []
+bot.scan("NIFTY", at(13, 30))
+check("trade_days=all scans a non-expiry day", fetched == [1])
+
+# backtest: dte pricing, trail, skips
+BTN = dict(xb.BT, slippage_pct=0.0)
+p0, p3 = xb.premium(25000, 25000, 800, 15.0, "CE", BTN, 0), xb.premium(25000, 25000, 800, 15.0, "CE", BTN, 3)
+check("sim: a 3-days-to-expiry ATM option costs much more than on expiry day", p3 > 4 * p0, f"{p0:.1f} vs {p3:.1f}")
+S_ne = eb.compile_strategy(dict(CFG["strategy"], min_premium=1, max_premium=1000, otm_steps=0, mtf_tfs=[], min_premium_ne=1, max_premium_ne=2000))
+cap_big = dict(CFG, capital=2_000_000)
+
+
+def sim_ne(bars, fire_at, trail, dte=3, cfg_=cap_big, ex_extra=None):
+    feat = eb.day_features(bars, S_ne)
+    real = eb.signal
+    eb.signal = lambda f, i, S_: "CE" if i == fire_at else None
+    ex_ = {"breakeven": False, "trail": trail, "skips": 0}
+    try:
+        tr_ = xb.simulate_day("NIFTY", day, bars, feat, lambda ts: 15.0, S_ne, ex_, BTN, cfg_, dte)
+    finally:
+        eb.signal = real
+    return tr_, ex_
+
+
+up_then_down = {302: (25000, 25040, 25000, 25035), 303: (25035, 25036, 24900, 24905)}   # +10% then a deep reversal
+tr_t, _ = sim_ne(make_bars(up_then_down), SIG, (10, 15))
+tr_n, _ = sim_ne(make_bars(up_then_down), SIG, None)
+check("sim: +10% then reversal -> TRAIL exit keeps more than the plain -25% stop",
+      tr_t[0]["reason"] == "TRAIL" and tr_t[0]["ret_pct"] > tr_n[0]["ret_pct"] and tr_n[0]["reason"] == "SL",
+      f"trail {tr_t[0]['reason']} {tr_t[0]['ret_pct']}% vs none {tr_n[0]['reason']} {tr_n[0]['ret_pct']}%")
+check("sim: trade records days-to-expiry", tr_t[0]["dte"] == 3)
+tr_s, ex_s = sim_ne(make_bars({}), SIG, None, 3, dict(CFG, capital=200000))
+check("sim: non-expiry trade skipped when 1 lot risks > 1% (and counted)", len(tr_s) == 0 and ex_s["skips"] == 1, f"skips {ex_s['skips']}")
 
 shutil.rmtree(TMP, ignore_errors=True)
 print(f"\nRESULT: {passed} passed, {failed} failed")
