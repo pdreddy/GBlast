@@ -282,6 +282,10 @@ def simulate_day(index, day, bars, feat, vix_at, S, ex, bt, cfg, dte=0):
     sq_min, entry_end = eb._m(cfg["square_off"]), eb._m(cfg["entry_end"])
     sl_pct, tg_pct = cfg["stop_loss_pct"], cfg["target_pct"]
     trail = ex.get("trail")
+    if dte > 0:                                                    # non-expiry day: tight stop (5-7.5% max), 1:4 target, tighter trail
+        sl_pct, tg_pct = cfg["stop_loss_pct_ne"], cfg["target_pct_ne"]
+        if trail:
+            trail = (trail[0], cfg["trail_gap_pct_ne"])
     prem = lambda spot, K, m, vx, cp: premium(spot, K, m, vx, cp, bt, dte)
     if dte > 0:                                                    # longer-dated options cost more: separate premium band
         S = {**S, "min_premium": S.get("min_premium_ne", S["min_premium"]), "max_premium": S.get("max_premium_ne", S["max_premium"])}
@@ -402,13 +406,14 @@ class Market:
             return last[0]
         return at
 
-    def run(self, strategy_overrides, breakeven, bt=BT, start=None, end=None, trail="cfg", days=None):
+    def run(self, strategy_overrides, breakeven, bt=BT, start=None, end=None, trail="cfg", days=None, cfg_over=None):
         """trail: (trigger_pct, gap_pct), None = off, "cfg" = from CONFIG.  days: 'expiry' | 'non_expiry' | 'all' (default CONFIG)."""
         S = eb.compile_strategy({**self.cfg["strategy"], **strategy_overrides})
         if trail == "cfg":
             trail = (self.cfg["trail_trigger_pct"], self.cfg["trail_gap_pct"]) if self.cfg.get("trail_enabled") else None
         days = days or self.cfg.get("trade_days", "expiry")
         ex = {"breakeven": breakeven, "trail": trail, "skips": 0}
+        cfg = {**self.cfg, **(cfg_over or {})}
         out = []
         for (k, d), (bars, feat) in sorted(self.feat.items(), key=lambda x: (x[0][1], x[0][0])):
             if (start and d < start) or (end and d >= end):
@@ -416,7 +421,7 @@ class Market:
             dte = self.dte[(k, d)]
             if (days == "expiry" and dte != 0) or (days == "non_expiry" and dte == 0):
                 continue
-            out += simulate_day(k, d, bars, feat, self.vix_fn(d), S, ex, bt, self.cfg, dte)
+            out += simulate_day(k, d, bars, feat, self.vix_fn(d), S, ex, bt, cfg, dte)
         self.last_skips = ex["skips"]
         return out
 
@@ -644,6 +649,11 @@ def build_report(mkt, label, split, chosen, tune_tr, test_tr, grid, sens, be_cmp
     extra_html += (f"<div class='note'><b>Risk cap effect:</b> {skips} otherwise-valid signals were skipped because 1 lot would risk more than "
                    f"{C['risk_per_trade_pct']}% of capital (₹{C['capital'] * C['risk_per_trade_pct'] / 100:,.0f}). Longer-dated options cost more, so "
                    f"with a small account most non-expiry-day signals are skipped; that is the rule working, not a bug.</div>")
+    sl_ = C["stop_loss_pct_ne"] / 100
+    real_loss = ((1 - sl_) * (1 - BT["slippage_pct"] / 100) / (1 + BT["slippage_pct"] / 100) - 1) * 100
+    extra_html += (f"<div class='note'><b>Tight-stop reality check:</b> with {BT['slippage_pct']}% slippage on entry AND exit, a {C['stop_loss_pct_ne']:g}% stop actually "
+                   f"loses about {abs(real_loss):.1f}% - slippage eats over half of the allowed loss, and ordinary one-minute option noise can hit a "
+                   f"stop this close. Expect a lower win rate than on the wider expiry-day stop; the table above shows what the data says.</div>")
     ov = chosen["ov"]
     snippet = (f'"strategy": {{"mode": "{ov["mode"]}", "anchors": {ov.get("anchors")}, "win_start": "{ov["win_start"]}", "win_end": "{ov["win_end"]}", '
                f'"otm_steps": {ov["otm_steps"]}, "mtf_tfs": {ov["mtf_tfs"]}, ...}},   "breakeven_enabled": {chosen["be"]}')
@@ -653,6 +663,7 @@ def build_report(mkt, label, split, chosen, tune_tr, test_tr, grid, sens, be_cmp
 <div class="sub">{days[0]} to {days[-1]} · tune half: before {split} · test half: {split} onward (rules frozen) ·
 capital {money(cap)} · risk {C['risk_per_trade_pct']}%/trade · SL {C['stop_loss_pct']:.0f}% · target +{C['target_pct']:.0f}% ·
 slippage {BT['slippage_pct']}%/side + full charges · square-off {C['square_off']} ·
+non-expiry days: SL {C['stop_loss_pct_ne']:g}% / target +{C['target_pct_ne']:g}% ·
 days traded: {C['trade_days']} · auto trail: {('+%g%% trigger, %g%% below peak' % (C['trail_trigger_pct'], C['trail_gap_pct'])) if C['trail_enabled'] else 'off'}</div>
 
 <div class="banner {kind}"><b>{html.escape(headline)}</b><br>{html.escape(detail)}</div>
@@ -789,11 +800,19 @@ def main():
     skips = mkt.last_skips
     extra = []
     rows_ = []
-    for name, tr_ in (("No trailing stop", None), ("Trail: +10% trigger, 10% below peak", (10, 10)),
-                      ("Trail: +10% trigger, 15% below peak (default)", (10, 15)), ("Trail: +10% trigger, 25% below peak", (10, 25))):
-        r = mkt.run(chosen["ov"], chosen["be"], trail=tr_)
+    for name, tr_, ov_ in (("No trailing stop", None, {}),
+                           ("Trail +10%: gap 15% expiry day / 7.5% other days (default)", (10, 15), {}),
+                           ("Trail +10%: gap 25% expiry day / 10% other days", (10, 25), {"trail_gap_pct_ne": 10.0}),
+                           ("Trail +10%: gap 10% expiry day / 5% other days", (10, 10), {"trail_gap_pct_ne": 5.0})):
+        r = mkt.run(chosen["ov"], chosen["be"], trail=tr_, cfg_over=ov_)
         rows_.append((name, stats([t for t in r if t["date"] < split.isoformat()]), stats([t for t in r if t["date"] >= split.isoformat()])))
     extra.append(("Auto trailing stop after a +10% move: what it does to the chosen entry", rows_))
+    rows_ = []
+    for st_ in (5.0, 6.25, 7.5):
+        r = mkt.run(chosen["ov"], chosen["be"], days="non_expiry", cfg_over={"stop_loss_pct_ne": st_, "target_pct_ne": 4 * st_})
+        rows_.append((f"Non-expiry days only: stop {st_:g}%, target +{4 * st_:g}%", stats([t for t in r if t["date"] < split.isoformat()]),
+                      stats([t for t in r if t["date"] >= split.isoformat()])))
+    extra.append(("Non-expiry stop size (the tight 5-7.5% stop)", rows_))
     rows_ = []
     for name, dd in (("Expiry day only", "expiry"), ("Non-expiry days only", "non_expiry"), ("All days", "all")):
         r = mkt.run(chosen["ov"], chosen["be"], days=dd)

@@ -79,6 +79,10 @@ CONFIG = {
     "trail_min_step_pct": 1.0,              # only modify the broker SL if it rises >= 1% of entry
     # which days: "expiry" = expiry day only, "non_expiry" = other days (nearest weekly), "all" = both
     "trade_days": "all",
+    # NON-expiry days are not hero-or-zero: tight stop (5% to 7.5% MAX), target 4x the stop (1:4), tighter trail
+    "stop_loss_pct_ne": 7.5,                # must stay within [5.0, 7.5] - the bot refuses to start otherwise
+    "target_pct_ne": 30.0,                  # 4 x 7.5
+    "trail_gap_pct_ne": 7.5,
     "sl_limit_buffer_pct": 5.0,             # SL-L limit price this % below the trigger
     "gap_fallback_pct": 8.0,                # LTP this % below SL while SL still pending -> force exit
     "paper_slippage_pct": 2.0,              # paper fills are made worse by this % per side
@@ -124,6 +128,17 @@ CONFIG = {
 STATE_FILE = "expiry_blast_state.json"
 TRADE_LOG = "expiry_blast_trades.csv"
 KILL_FILE = "KILL"
+
+STOP_NE_RANGE = (5.0, 7.5)
+
+
+def validate_config(cfg):
+    lo, hi = STOP_NE_RANGE
+    if not (lo <= cfg["stop_loss_pct_ne"] <= hi):
+        raise ValueError(f"stop_loss_pct_ne must be between {lo} and {hi} (got {cfg['stop_loss_pct_ne']}): "
+                         "non-expiry-day trades use a tight stop, max 7.5%.")
+    return cfg
+
 
 # gamma_blast configures root logging into gamma_blast.log on import; give this bot its own log
 for _h in list(logging.root.handlers):
@@ -355,7 +370,7 @@ def apply_backtest_result(cfg, path="expiry_best.json"):
 # =====================================================================================
 class ExpiryBlast(g.GammaBlast):
     def __init__(self, cfg):                                   # deliberately not calling the parent __init__
-        self.cfg = cfg = apply_backtest_result(cfg)
+        self.cfg = cfg = validate_config(apply_backtest_result(cfg))
         self.paper = cfg["paper_trading"]
         self.S = compile_strategy(cfg["strategy"])
         self.broker = g.Broker(cfg)
@@ -497,8 +512,16 @@ class ExpiryBlast(g.GammaBlast):
         K, ltp = pick
         row = rows[K]
         fill_px = ltp * (1 + self.cfg["paper_slippage_pct"] / 100) if self.paper else ltp
-        self.enter(name, side, row, g.round_tick(fill_px, row.tick),
-                   {"mode": self.S["mode"], "expiry_day": is_exp, "mtf": f.get("mtf", [None])[-1], "spot": spot, "ltp_seen": ltp, "expiry": expiry.strftime("%Y-%m-%d")})
+        c_ = self.cfg
+        over = {} if is_exp else {"stop_loss_pct": c_["stop_loss_pct_ne"], "target_pct": c_["target_pct_ne"]}
+        saved, self.cfg = self.cfg, {**self.cfg, **over}          # enter()/size() read stop and target from self.cfg
+        try:
+            self.enter(name, side, row, g.round_tick(fill_px, row.tick),
+                       {"trail_gap": c_["trail_gap_pct"] if is_exp else c_["trail_gap_pct_ne"],
+                        "stop_pct": self.cfg["stop_loss_pct"],
+                        "mode": self.S["mode"], "expiry_day": is_exp, "mtf": f.get("mtf", [None])[-1], "spot": spot, "ltp_seen": ltp, "expiry": expiry.strftime("%Y-%m-%d")})
+        finally:
+            self.cfg = saved
 
     # ---------------- manage (-25% SL, +100% target, optional breakeven) ----------------
     def manage(self):
@@ -536,7 +559,7 @@ class ExpiryBlast(g.GammaBlast):
 
             # auto trailing stop: after +trigger%, stop = peak premium minus gap% (only ever moves up)
             if c.get("trail_enabled") and (p.peak / p.entry - 1) * 100 >= c["trail_trigger_pct"]:
-                new_sl = g.round_tick(p.peak * (1 - c["trail_gap_pct"] / 100), p.tick)
+                new_sl = g.round_tick(p.peak * (1 - p.meta.get("trail_gap", c["trail_gap_pct"]) / 100), p.tick)
                 if new_sl - p.sl >= p.entry * c["trail_min_step_pct"] / 100:
                     if not p.meta.get("trailing"):
                         log.info("TRAIL ON %s peak %.2f (+%.0f%%)", p.symbol, p.peak, (p.peak / p.entry - 1) * 100)

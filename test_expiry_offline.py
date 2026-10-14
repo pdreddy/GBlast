@@ -592,7 +592,7 @@ BTN = dict(xb.BT, slippage_pct=0.0)
 p0, p3 = xb.premium(25000, 25000, 800, 15.0, "CE", BTN, 0), xb.premium(25000, 25000, 800, 15.0, "CE", BTN, 3)
 check("sim: a 3-days-to-expiry ATM option costs much more than on expiry day", p3 > 4 * p0, f"{p0:.1f} vs {p3:.1f}")
 S_ne = eb.compile_strategy(dict(CFG["strategy"], min_premium=1, max_premium=1000, otm_steps=0, mtf_tfs=[], min_premium_ne=1, max_premium_ne=2000))
-cap_big = dict(CFG, capital=2_000_000)
+cap_big = dict(CFG, capital=2_000_000, stop_loss_pct_ne=25.0, target_pct_ne=100.0)   # old 25% semantics for these sim tests
 
 
 def sim_ne(bars, fire_at, trail, dte=3, cfg_=cap_big, ex_extra=None):
@@ -614,8 +614,94 @@ check("sim: +10% then reversal -> TRAIL exit keeps more than the plain -25% stop
       tr_t[0]["reason"] == "TRAIL" and tr_t[0]["ret_pct"] > tr_n[0]["ret_pct"] and tr_n[0]["reason"] == "SL",
       f"trail {tr_t[0]['reason']} {tr_t[0]['ret_pct']}% vs none {tr_n[0]['reason']} {tr_n[0]['ret_pct']}%")
 check("sim: trade records days-to-expiry", tr_t[0]["dte"] == 3)
-tr_s, ex_s = sim_ne(make_bars({}), SIG, None, 3, dict(CFG, capital=200000))
+tr_s, ex_s = sim_ne(make_bars({}), SIG, None, 3, dict(CFG, capital=200000, stop_loss_pct_ne=25.0, target_pct_ne=100.0))
 check("sim: non-expiry trade skipped when 1 lot risks > 1% (and counted)", len(tr_s) == 0 and ex_s["skips"] == 1, f"skips {ex_s['skips']}")
+
+# ---------------------------------------------------------------------------
+print("\n[14] Non-expiry days: tight 5-7.5% stop (hero-or-zero keeps 25%)")
+check("config: non-expiry stop 7.5%, target 4x = 30%, expiry-day stop still 25%",
+      CFG["stop_loss_pct_ne"] == 7.5 and CFG["target_pct_ne"] == 4 * CFG["stop_loss_pct_ne"] and CFG["stop_loss_pct"] == 25.0)
+for v, ok in ((5.0, True), (7.5, True), (7.6, False), (10.0, False), (25.0, False), (4.0, False)):
+    try:
+        eb.validate_config({**CFG, "stop_loss_pct_ne": v})
+        good = True
+    except ValueError:
+        good = False
+    check(f"validate_config: non-expiry stop {v}% {'accepted' if ok else 'REFUSED'}", good == ok)
+
+
+class ScanMaster:
+    def __init__(self, exp):
+        self.exp = exp
+        self.rows = [g.OptionRow(f"NSE:NIFTY{k}CE", k, "CE", exp, 65, 0.05) for k in range(24800, 25300, 50)] + \
+                    [g.OptionRow(f"NSE:NIFTY{k}PE", k, "PE", exp, 65, 0.05) for k in range(24800, 25300, 50)]
+
+    def nearest_expiry(self, name, now):
+        return self.exp
+
+    def chain(self, name, expiry):
+        return self.rows
+
+
+def scan_once(exp_delta):
+    if os.path.exists(eb.TRADE_LOG):
+        os.remove(eb.TRADE_LOG)
+    bot = new_bot(trade_days="all")
+    bot.S = eb.compile_strategy(dict(CFG["strategy"], mtf_tfs=[], win_start="09:30", win_end="14:45", min_premium=1, max_premium=1000,
+                                     min_premium_ne=1, max_premium_ne=1000))
+    now_ = at(13, 30)
+    bot.master = ScanMaster(now_ + exp_delta)
+    base = int(now_.timestamp())
+    bot.broker.candles_range = lambda *a, **k: [[base - 60 * (60 - i), 25000, 25001, 24999, 25000, 0] for i in range(60)]
+    bot._closed = lambda c: c
+    bot.broker.ltp = lambda syms: {s: (25000.0 if "INDEX" in s else 150.0) for s in syms}
+    real = eb.signal
+    eb.signal = lambda f, i, S_: "CE"
+    try:
+        bot.scan("NIFTY", now_)
+    finally:
+        eb.signal = real
+    return bot
+
+
+bot = scan_once(dt.timedelta(days=3))                              # non-expiry day
+p = bot.positions.get("NIFTY")
+check("non-expiry scan: entered with a 7.5% stop (SL 138.75) and +30% target (195)",
+      p is not None and abs(p.sl - 138.75) < 0.06 and abs(p.target - 195.0) < 0.06, f"{p and (p.sl, p.target)}")
+check("non-expiry: 1% risk buys 2 lots (130 qty) instead of 0 with a 25% stop", p is not None and p.qty == 130, f"qty {p and p.qty}")
+check("non-expiry: trailing gap stored as 7.5%", p is not None and p.meta.get("trail_gap") == 7.5)
+bot.broker.px = {p.symbol: 150.0}
+bot.cfg = {**bot.cfg, "trail_enabled": True}
+bot.broker.px[p.symbol] = 170.0                                    # +13% -> trail starts, SL = 170 x 0.925
+bot.broker.ltp = lambda syms: {s: 170.0 for s in syms}
+bot.manage()
+check("non-expiry trail: SL = peak x (1 - 7.5%) = 157.25", abs(bot.positions["NIFTY"].sl - 157.25) < 0.06, f"SL {bot.positions['NIFTY'].sl}")
+bot = scan_once(dt.timedelta(hours=2))                             # expiry day, same premium
+check("expiry day keeps the 25% stop: 1 lot would risk Rs 2,437 > Rs 2,000 -> skipped", "NIFTY" not in bot.positions)
+
+# backtest uses the tight stop on non-expiry days only
+BTX0 = dict(xb.BT, slippage_pct=0.0)
+cfg75 = dict(CFG, capital=2_000_000)
+drop = {302: (25000, 25001, 24975, 24978)}
+feat_ = eb.day_features(make_bars(drop), S_ne)
+real = eb.signal
+eb.signal = lambda f, i, S_: "CE" if i == SIG else None
+t_ne = xb.simulate_day("NIFTY", day, make_bars(drop), feat_, lambda ts: 15.0, S_ne, {"breakeven": False, "trail": None}, BTX0, cfg75, 3)
+t_ex = xb.simulate_day("NIFTY", day, make_bars(drop), feat_, lambda ts: 15.0, S1, {"breakeven": False, "trail": None}, BTX0, cfg75, 0)
+eb.signal = real
+check("sim: non-expiry trade stops out at -7.5%", t_ne and t_ne[0]["reason"] == "SL" and abs(t_ne[0]["ret_pct"] + 7.5) < 0.2, f"{t_ne[0]['reason']} {t_ne[0]['ret_pct']}%")
+check("sim: expiry-day trade keeps the -25% stop", t_ex and abs(t_ex[0]["ret_pct"] + 25) < 0.3 or (t_ex and t_ex[0]["reason"] != "SL"), f"{t_ex and (t_ex[0]['reason'], t_ex[0]['ret_pct'])}")
+eb.signal = lambda f, i, S_: "CE" if i == SIG else None
+rise = {302: (25000, 25095, 25000, 25092)}
+t_up = xb.simulate_day("NIFTY", day, make_bars(rise), feat_, lambda ts: 15.0, S_ne, {"breakeven": False, "trail": None}, BTX0, cfg75, 3)
+eb.signal = real
+check("sim: non-expiry target at +30%", t_up and t_up[0]["reason"] == "TARGET" and abs(t_up[0]["ret_pct"] - 30) < 0.5, f"{t_up and (t_up[0]['reason'], t_up[0]['ret_pct'])}")
+eb.signal = lambda f, i, S_: "CE" if i == SIG else None
+t_sz = xb.simulate_day("NIFTY", day, make_bars(drop), feat_, lambda ts: 15.0, S_ne, {"breakeven": False, "trail": None}, BTX0, dict(CFG, capital=200000), 3)
+eb.signal = real
+risk_ne = t_sz[0]["lots"] * 65 * t_sz[0]["entry"] * 0.075
+check("sim: 1% risk sizing uses the 7.5% stop (Rs 2,000 budget)", risk_ne <= 2000 and (t_sz[0]["lots"] + 1) * 65 * t_sz[0]["entry"] * 0.075 > 2000,
+      f"{t_sz[0]['lots']} lots risk Rs {risk_ne:,.0f}")
 
 shutil.rmtree(TMP, ignore_errors=True)
 print(f"\nRESULT: {passed} passed, {failed} failed")
