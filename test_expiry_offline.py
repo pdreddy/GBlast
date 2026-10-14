@@ -502,6 +502,32 @@ check("ANCHOR: signal on a bar does not depend on later bars", all(eb.signal(ff,
 fz = eb.day_features(anchor_day(840, 1)[:100], Sx)
 check("incomplete range (data missing) -> no anchor, no trade", fz["anchor"].get(840) is None)
 
+# ---------------------------------------------------------------------------
+print("\n[12] Token check")
+
+
+class TokB:
+    class f:
+        get_profile = None
+
+    def __init__(self, resp):
+        self.resp = resp
+
+    def _call(self, fn, data=None, retries=3):
+        return self.resp
+
+
+check("valid token accepted", xb.token_valid(TokB({"s": "ok", "data": {}})))
+check("'Could not authenticate' token rejected", not xb.token_valid(TokB({"s": "error", "message": "Could not authenticate the user"})))
+class AuthFail(HistBroker):
+    def _call(self, fn, data):
+        return {"s": "error", "message": "Could not authenticate the user"}
+try:
+    xb.fetch_range(AuthFail(), "NSE:NIFTY50-INDEX", dt.date(2026, 10, 1), dt.date(2026, 10, 13))
+    check("download aborts on auth error instead of silently continuing", False)
+except SystemExit:
+    check("download aborts on auth error instead of silently continuing", True)
+
 shutil.rmtree(TMP, ignore_errors=True)
 print(f"\nRESULT: {passed} passed, {failed} failed")
 sys.exit(1 if failed else 0)

@@ -114,6 +114,8 @@ def fetch_range(broker, symbol, start, end):
             "symbol": symbol, "resolution": "1", "date_format": "1",
             "range_from": cur.strftime("%Y-%m-%d"), "range_to": stop.strftime("%Y-%m-%d"), "cont_flag": "1"})
         if r.get("s") != "ok" and not r.get("candles"):
+            if "authenticate" in str(r.get("message", "")).lower() or r.get("code") in (-16, -8, -15):
+                raise SystemExit("FYERS rejected the login token (Could not authenticate). Delete access_token.txt and run again.")
             print(f"   warning: {symbol} {cur}..{stop}: {r.get('message', r)}")
         out += r.get("candles") or []
         cur = stop + dt.timedelta(days=1)
@@ -158,12 +160,34 @@ def sync_data(broker, indices, folder="data", days=365, today=None):
             print(f"{key}: up to date")
 
 
+def token_valid(broker):
+    """True if FYERS accepts the saved access token (a cheap profile call)."""
+    try:
+        resp = broker._call(broker.f.get_profile, retries=1)
+    except Exception:
+        return False
+    return isinstance(resp, dict) and resp.get("s") == "ok"
+
+
 def connect():
-    """Log in if today's token is missing (one paste of the auth_code), then return a Broker."""
+    """Return a Broker with a WORKING token. The token file is verified against FYERS (file date alone is not trusted);
+    if it is missing, stale or invalid you get the login prompt (one auth_code paste)."""
     import fyers_login
-    if not fyers_login.token_is_from_today():
+    broker = None
+    if fyers_login.token_is_from_today():
+        try:
+            broker = eb.g.Broker(C)
+        except Exception:
+            broker = None
+    if broker is None or not token_valid(broker):
+        print("Saved token is missing, expired or invalid - logging in to FYERS again.")
         fyers_login.login()
-    return eb.g.Broker(C)
+        broker = eb.g.Broker(C)
+        if not token_valid(broker):
+            raise SystemExit("FYERS still rejects the token after login. Check FYERS_CLIENT_ID / FYERS_SECRET_KEY in .env "
+                             "(python3 config.py) and that the auth_code was pasted fresh and complete.")
+    print("FYERS login OK.")
+    return broker
 
 
 def by_day(candles):
