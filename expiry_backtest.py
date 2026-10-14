@@ -843,6 +843,8 @@ def main():
         with open("expiry_best.json", "w") as f:
             json.dump({"generated": dt.date.today().isoformat(), "name": chosen["name"], "strategy": chosen["ov"],
                        "breakeven": chosen["be"], "verdict": verdict(s_tu, s_te)[0],
+                       "tune": {k_: s_tu[k_] for k_ in ("trades", "profit_factor", "net", "win_rate")},
+                       "test": {k_: s_te[k_] for k_ in ("trades", "profit_factor", "net", "win_rate")},
                        "headline": verdict(s_tu, s_te)[1]}, f, indent=2)
         print("Saved expiry_best.json (the bot can use it: set use_backtest_result to True in expiry_blast.py)")
     for nm, s in (("TUNE", s_tu), ("TEST", s_te)):

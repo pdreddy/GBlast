@@ -305,6 +305,11 @@ def main():
     events = build_events(data, indices)
     rows = analyse(events, split)
     passes = report(rows, label, split, days, out, len(events))
+    import json
+    best = max(passes, key=lambda r: abs(r["test"]["t"]), default=None)
+    json.dump({"tests": len(rows), "passes": len(passes), "generated": dt.date.today().isoformat(), "demo": bool(a.demo),
+               "best": best and {"signal": best["signal"], "H": best["H"], "side": best["side"], "unseen_bps": best["test"]["mean"],
+                                 "t": best["test"]["t"]}}, open("signal_lab_summary.json", "w"))
     print(f"{len(rows)} tests, {len(passes)} passed (|t|>={T_DISCOVERY} discovery, same sign |t|>={T_TEST} unseen)")
     for r in passes:
         print(f"  PASS {r['signal']} {r['side']} {r['H']}m  discovery {r['disc']['mean']:+.1f}bps (t {r['disc']['t']:.2f}) "

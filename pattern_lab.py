@@ -411,6 +411,11 @@ def main():
     print(f"{len(all_days)} trading days {all_days[0]} .. {all_days[-1]} | discovery < {split} <= unseen | cost {a.cost_r}R")
     rows = analyse(trades, split, a.cost_r)
     passes = report(rows, label, split, all_days, out, a.cost_r, len(trades))
+    import json
+    best = max(passes, key=lambda r: r["test"]["t"], default=None)
+    json.dump({"tests": len(rows), "passes": len(passes), "generated": dt.date.today().isoformat(), "demo": bool(a.demo),
+               "best": best and {"pattern": best["pattern"], "rr": best["rr"], "win": best["test"]["win"],
+                                 "net_r": best["test"]["net"], "t": best["test"]["t"]}}, open("pattern_lab_summary.json", "w"))
     print(f"{len(rows)} tests, {len(passes)} passed")
     for r in passes:
         print(f"  PASS {r['pattern']} {r['rr']}R  discovery {r['disc']['net']:+.2f}R (t {r['disc']['t']:.2f}) "

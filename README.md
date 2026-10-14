@@ -153,3 +153,12 @@ Files: `expiry_blast.py` (bot + shared signal code), `expiry_backtest.py`, `expi
 **Non-expiry days + auto trailing stop:** `trade_days` lets the bot trade every day (nearest weekly contract; separate premium band `min/max_premium_ne`). The backtest prices non-expiry options with IV = VIX x `iv_mult_nonexp` and reports expiry-only vs non-expiry vs all days, trailing stop off / 10% / 15% / 25% gap, and how many signals the 1% risk cap skipped (longer-dated options cost more, so a small account skips many).
 
 **Tight stop on non-expiry days:** hero-or-zero (expiry day) keeps the -25% stop / +100% target. On every other day the stop is `stop_loss_pct_ne` = **5% to 7.5% max** (default 7.5%, the bot refuses to start outside that range), target `target_pct_ne` = 4 x stop (1:4), trail gap `trail_gap_pct_ne` = 7.5% after the +10% trigger. With 1% risk the tighter stop buys more lots (about 2 NIFTY lots at a Rs 150 premium on Rs 2L). Caveat: 2% slippage per side means a 7.5% stop really loses about 11.5%; the report has a stop-size table (5% / 6.25% / 7.5%).
+
+
+---
+
+# One command + live gate
+
+`run_all.command` (or `python3 run_all.py`): ONE login, downloads the data once, runs Signal Lab + Pattern Lab + the option backtest, and writes `master_report.html` with a single overall verdict ("nothing validated" / "weak" / "possible edge") and the gate status. There is no strategy with a "full success rate" - this tells you honestly which pieces have evidence.
+
+**Live gate (`gate.py`)**: the bot refuses `paper_trading = False` unless (1) the latest backtest verdict is not "NO EDGE", (2) 40+ paper trades exist, (3) paper net P&L after costs is positive with profit factor >= 1.2, (4) paper max drawdown < 6% of capital. `"live_gate": False` in CONFIG overrides it (loud warning) - only do that knowingly.

@@ -703,6 +703,56 @@ risk_ne = t_sz[0]["lots"] * 65 * t_sz[0]["entry"] * 0.075
 check("sim: 1% risk sizing uses the 7.5% stop (Rs 2,000 budget)", risk_ne <= 2000 and (t_sz[0]["lots"] + 1) * 65 * t_sz[0]["entry"] * 0.075 > 2000,
       f"{t_sz[0]['lots']} lots risk Rs {risk_ne:,.0f}")
 
+# ---------------------------------------------------------------------------
+print("\n[15] Live-trading gate")
+import gate
+import json as _json
+gdir = tempfile.mkdtemp()
+best_p, log_p = os.path.join(gdir, "best.json"), os.path.join(gdir, "trades.csv")
+
+
+def write_log(pnls, mode="PAPER"):
+    with open(log_p, "w", newline="") as f:
+        w = csv.writer(f)
+        w.writerow(["date", "index", "symbol", "type", "qty", "entry_time", "entry", "exit_time", "exit", "pnl", "pnl_pct", "reason", "mode", "meta"])
+        for i, p in enumerate(pnls):
+            w.writerow(["2026-10-01", "NIFTY", "x", "CE", 1, "t", 1, "t", 1, p, 0, "SL", mode, "{}"])
+
+
+ok, why = gate.live_allowed(200000, best_p, log_p)
+check("no backtest + no paper trades -> live refused", not ok and len(why) == 2, f"{why}")
+_json.dump({"verdict": "bad", "headline": "NO EDGE FOUND."}, open(best_p, "w"))
+write_log([500] * 45 + [-300] * 5)
+ok, why = gate.live_allowed(200000, best_p, log_p)
+check("backtest says NO EDGE -> refused even with profitable paper trades", not ok and any("NO EDGE" in w for w in why), f"{why}")
+_json.dump({"verdict": "warn", "headline": "WEAK"}, open(best_p, "w"))
+write_log([500] * 10)
+ok, why = gate.live_allowed(200000, best_p, log_p)
+check("too few paper trades -> refused", not ok and any("only 10 paper" in w for w in why))
+write_log([-200, 150] * 25)
+ok, why = gate.live_allowed(200000, best_p, log_p)
+check("50 paper trades but net negative -> refused", not ok and any("net P&L" in w for w in why), f"{why}")
+write_log([300, 300, -150] * 17)
+ok, why = gate.live_allowed(200000, best_p, log_p)
+check("profitable paper run (51 trades, PF 4) + backtest not 'bad' -> gate PASSES", ok and not why, f"{why}")
+write_log([400] * 30 + [-14000] + [400] * 20)
+ok, why = gate.live_allowed(200000, best_p, log_p)
+check("a 14,000 drawdown (> 6% of 2L) -> refused", not ok and any("drawdown" in w for w in why), f"{why}")
+write_log([300] * 60, mode="LIVE")
+check("LIVE rows are not counted as paper evidence", gate.paper_stats(log_p)["n"] == 0)
+real_gate = gate.live_allowed
+gate.live_allowed = lambda capital: (False, ["test reason"])
+try:
+    eb.check_live_gate({**CFG, "paper_trading": False, "live_gate": True})
+    check("bot refuses live mode when the gate is closed", False)
+except SystemExit as e:
+    check("bot refuses live mode when the gate is closed", "test reason" in str(e))
+eb.check_live_gate({**CFG, "paper_trading": False, "live_gate": False})
+check("live_gate=False overrides (with a warning) - your explicit choice", True)
+gate.live_allowed = real_gate
+check("live_gate is ON by default", CFG["live_gate"] is True and CFG["paper_trading"] is True)
+shutil.rmtree(gdir, ignore_errors=True)
+
 shutil.rmtree(TMP, ignore_errors=True)
 print(f"\nRESULT: {passed} passed, {failed} failed")
 sys.exit(1 if failed else 0)

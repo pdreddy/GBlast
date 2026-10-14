@@ -53,6 +53,7 @@ CONFIG = {
     "client_id": CLIENT_ID,
     "access_token_file": "access_token.txt",
     "paper_trading": True,                  # <-- keep True until you have weeks of paper results
+    "live_gate": True,                      # True = live mode is REFUSED until gate.py's conditions are met (see gate.py)
     "use_backtest_result": False,           # True = load strategy + breakeven from expiry_best.json (written by
                                             # expiry_backtest). Ignored if the backtest verdict was "NO EDGE".
 
@@ -138,6 +139,19 @@ def validate_config(cfg):
         raise ValueError(f"stop_loss_pct_ne must be between {lo} and {hi} (got {cfg['stop_loss_pct_ne']}): "
                          "non-expiry-day trades use a tight stop, max 7.5%.")
     return cfg
+
+
+def check_live_gate(cfg):
+    """Refuse real-money trading until the plan's evidence exists (gate.py). Switch off with live_gate=False at your own risk."""
+    import gate
+    ok, reasons = gate.live_allowed(cfg["capital"])
+    if ok:
+        log.info("Live gate: PASSED")
+        return
+    if cfg.get("live_gate", True):
+        raise SystemExit("LIVE TRADING REFUSED by the live gate:\n  - " + "\n  - ".join(reasons) +
+                         "\nStay in paper mode (paper_trading=True) until these are met, or set live_gate=False to override knowingly.")
+    log.warning("LIVE GATE OVERRIDDEN (live_gate=False). Not met: %s", "; ".join(reasons))
 
 
 # gamma_blast configures root logging into gamma_blast.log on import; give this bot its own log
@@ -372,6 +386,8 @@ class ExpiryBlast(g.GammaBlast):
     def __init__(self, cfg):                                   # deliberately not calling the parent __init__
         self.cfg = cfg = validate_config(apply_backtest_result(cfg))
         self.paper = cfg["paper_trading"]
+        if not self.paper:
+            check_live_gate(cfg)
         self.S = compile_strategy(cfg["strategy"])
         self.broker = g.Broker(cfg)
         self.master = g.SymbolMaster()

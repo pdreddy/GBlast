@@ -7,3 +7,7 @@ gamma_blast.log
 access_token.txt
 *.log
 expiry_best.json
+signal_lab_summary.json
+pattern_lab_summary.json
+trading_gate.json
+master_report.html
